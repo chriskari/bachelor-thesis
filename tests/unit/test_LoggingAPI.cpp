@@ -3,13 +3,14 @@
 #include "LockFreeQueue.hpp"
 #include <chrono>
 #include <thread>
+#include <optional>
 
 class LoggingAPITest : public ::testing::Test
 {
 protected:
     void SetUp() override
     {
-        // Create a fresh instance for each test
+        // Reset singleton for each test
         LoggingAPI::s_instance.reset();
 
         // Create a LockFreeQueue instance
@@ -30,7 +31,6 @@ TEST_F(LoggingAPITest, GetInstanceReturnsSingleton)
 {
     LoggingAPI &instance1 = LoggingAPI::getInstance();
     LoggingAPI &instance2 = LoggingAPI::getInstance();
-
     EXPECT_EQ(&instance1, &instance2);
 }
 
@@ -38,7 +38,6 @@ TEST_F(LoggingAPITest, GetInstanceReturnsSingleton)
 TEST_F(LoggingAPITest, InitializeWithValidQueue)
 {
     LoggingAPI &api = LoggingAPI::getInstance();
-
     EXPECT_TRUE(api.initialize(queue));
     EXPECT_TRUE(api.reset());
 }
@@ -47,7 +46,6 @@ TEST_F(LoggingAPITest, InitializeWithValidQueue)
 TEST_F(LoggingAPITest, InitializeWithNullQueue)
 {
     LoggingAPI &api = LoggingAPI::getInstance();
-
     EXPECT_FALSE(api.initialize(nullptr));
 }
 
@@ -55,10 +53,8 @@ TEST_F(LoggingAPITest, InitializeWithNullQueue)
 TEST_F(LoggingAPITest, DoubleInitialization)
 {
     LoggingAPI &api = LoggingAPI::getInstance();
-
     EXPECT_TRUE(api.initialize(queue));
     EXPECT_FALSE(api.initialize(queue));
-
     EXPECT_TRUE(api.reset());
 }
 
@@ -70,14 +66,44 @@ TEST_F(LoggingAPITest, AppendBeforeInitialization)
     EXPECT_FALSE(api.append(entry));
 }
 
-// Test appending log entry after initialization
-TEST_F(LoggingAPITest, AppendAfterInitialization2)
+// Test appending log entry after initialization (no filename)
+TEST_F(LoggingAPITest, AppendAfterInitialization)
 {
     LoggingAPI &api = LoggingAPI::getInstance();
     EXPECT_TRUE(api.initialize(queue));
-    LogEntry entry(LogEntry::ActionType::READ, "location", "user", "subject");
 
+    LogEntry entry(LogEntry::ActionType::READ, "location", "user", "subject");
     EXPECT_TRUE(api.append(entry));
+
+    // Dequeue and check content
+    LogEntry dequeued;
+    EXPECT_TRUE(queue->dequeue(dequeued));
+    EXPECT_EQ(dequeued.getActionType(), LogEntry::ActionType::READ);
+    EXPECT_FALSE(dequeued.getTargetFilename().has_value());
+
+    EXPECT_TRUE(api.reset());
+}
+
+// Test appending log entry after initialization with filename
+TEST_F(LoggingAPITest, AppendWithFilename)
+{
+    LoggingAPI &api = LoggingAPI::getInstance();
+    EXPECT_TRUE(api.initialize(queue));
+
+    LogEntry entry(
+        LogEntry::ActionType::UPDATE,
+        "loc",
+        "userX",
+        "subjectY",
+        std::optional<std::string>("custom.log"));
+    EXPECT_TRUE(api.append(entry));
+
+    // Dequeue and check filename preserved
+    LogEntry dequeued;
+    EXPECT_TRUE(queue->dequeue(dequeued));
+    ASSERT_TRUE(dequeued.getTargetFilename().has_value());
+    EXPECT_EQ(dequeued.getTargetFilename().value(), "custom.log");
+
     EXPECT_TRUE(api.reset());
 }
 
@@ -95,8 +121,8 @@ TEST_F(LoggingAPITest, BlockingAppendWithConsumption)
     std::thread consumer([&smallQueue]()
                          {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        LogEntry dummyEntry;
-        smallQueue->dequeue(dummyEntry); });
+        LogEntry dummy;
+        smallQueue->dequeue(dummy); });
 
     LogEntry entry2(LogEntry::ActionType::READ, "location2", "user2", "subject2");
     auto start = std::chrono::steady_clock::now();
@@ -121,20 +147,15 @@ TEST_F(LoggingAPITest, AppendDuringShutdown)
     LogEntry entry1(LogEntry::ActionType::READ, "location1", "user1", "subject1");
     EXPECT_TRUE(api.append(entry1));
 
-    // Set up a thread to try to append while we shutdown
     std::atomic<bool> appendFinished(false);
     std::thread appendThread([&]()
                              {
         LogEntry entry2(LogEntry::ActionType::READ, "location2", "user2", "subject2");
-        // This should block initially, then return false after shutdown
         bool result = api.append(entry2);
         EXPECT_FALSE(result);
         appendFinished.store(true); });
 
-    // Give the append thread time to start and block
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
-
-    // Now shut down while the thread is blocked
     EXPECT_TRUE(api.reset());
 
     appendThread.join();
@@ -145,7 +166,6 @@ TEST_F(LoggingAPITest, AppendDuringShutdown)
 TEST_F(LoggingAPITest, ShutdownWithoutInitialization)
 {
     LoggingAPI &api = LoggingAPI::getInstance();
-
     EXPECT_FALSE(api.reset());
 }
 
@@ -158,13 +178,11 @@ TEST_F(LoggingAPITest, ShutdownWithWait)
     LogEntry entry(LogEntry::ActionType::READ, "location", "user", "subject");
     EXPECT_TRUE(api.append(entry));
 
-    // Launch an asynchronous consumer that waits briefly before draining the queue.
     std::thread consumer([this]()
                          {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500)); // simulate delay
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
         LogEntry dummy;
-        while(queue->dequeue(dummy)) {
-
+        while (queue->dequeue(dummy)) {
         } });
 
     EXPECT_TRUE(api.reset());
@@ -176,7 +194,6 @@ TEST_F(LoggingAPITest, ShutdownWithWait)
 TEST_F(LoggingAPITest, ExportLogsWithoutInitialization)
 {
     LoggingAPI &api = LoggingAPI::getInstance();
-
     auto now = std::chrono::system_clock::now();
     EXPECT_FALSE(api.exportLogs("output.log", now, now));
 }
@@ -206,11 +223,8 @@ TEST_F(LoggingAPITest, ThreadSafetySingleton)
     }
 
     for (auto &t : threads)
-    {
         t.join();
-    }
 
-    // All threads should get the same instance
     for (int i = 1; i < 10; i++)
     {
         EXPECT_EQ(instances[0], instances[i]);
@@ -228,23 +242,18 @@ TEST_F(LoggingAPITest, ThreadSafetyOperations)
     {
         threads.emplace_back([&api, i]()
                              {
-                                 // Each thread appends 10 entries
-                                 for (int j = 0; j < 10; j++) {
-                                     LogEntry entry(
-                                         LogEntry::ActionType::READ,
-                                         "location_" + std::to_string(i),
-                                         "user_" + std::to_string(i),
-                                         "subject_" + std::to_string(j)
-                                        );
-                                     EXPECT_TRUE(api.append(entry));
-                                 } });
+            for (int j = 0; j < 10; j++) {
+                LogEntry entry(
+                    LogEntry::ActionType::READ,
+                    "location_" + std::to_string(i),
+                    "user_" + std::to_string(i),
+                    "subject_" + std::to_string(j));
+                EXPECT_TRUE(api.append(entry));
+            } });
     }
 
     for (auto &t : threads)
-    {
         t.join();
-    }
-
     EXPECT_EQ(queue->size(), 100);
 }
 
