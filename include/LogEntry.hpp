@@ -6,6 +6,7 @@
 #include <vector>
 #include <memory>
 #include <cstdint>
+#include <optional>
 
 class LogEntry
 {
@@ -24,7 +25,8 @@ public:
         ActionType actionType,
         const std::string &dataLocation,
         const std::string &userId,
-        const std::string &dataSubjectId);
+        const std::string &dataSubjectId,
+        const std::optional<std::string> &targetFilename = std::nullopt);
 
     std::vector<uint8_t> serialize() const;
 
@@ -47,12 +49,16 @@ public:
     std::chrono::system_clock::time_point getTimestamp() const { return m_timestamp; }
     void setTimestamp(const std::chrono::system_clock::time_point &timestamp) { m_timestamp = timestamp; }
 
+    std::optional<std::string> getTargetFilename() const { return m_targetFilename; }
+    void setTargetFilename(const std::optional<std::string> &filename) { m_targetFilename = filename; }
+
 private:
     ActionType m_actionType;                           // Type of GDPR operation
     std::string m_dataLocation;                        // Location of the data being operated on
     std::string m_userId;                              // ID of the user performing the operation
     std::string m_dataSubjectId;                       // ID of the data subject
     std::chrono::system_clock::time_point m_timestamp; // When the operation occurred
+    std::optional<std::string> m_targetFilename;       // Optional file destination
 };
 
 // Helper functions

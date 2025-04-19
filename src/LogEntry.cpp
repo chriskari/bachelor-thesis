@@ -3,7 +3,6 @@
 #include <sstream>
 #include <iomanip>
 #include <chrono>
-#include <openssl/evp.h>
 #include <stdexcept>
 
 std::string actionTypeToString(LogEntry::ActionType actionType)
@@ -28,15 +27,20 @@ LogEntry::LogEntry()
       m_dataLocation(""),
       m_userId(""),
       m_dataSubjectId(""),
-      m_timestamp(std::chrono::system_clock::now()) {}
+      m_timestamp(std::chrono::system_clock::now()),
+      m_targetFilename(std::nullopt) {}
 
-LogEntry::LogEntry(ActionType actionType, const std::string &dataLocation,
-                   const std::string &userId, const std::string &dataSubjectId)
+LogEntry::LogEntry(ActionType actionType,
+                   const std::string &dataLocation,
+                   const std::string &userId,
+                   const std::string &dataSubjectId,
+                   const std::optional<std::string> &targetFilename)
     : m_actionType(actionType),
       m_dataLocation(dataLocation),
       m_userId(userId),
       m_dataSubjectId(dataSubjectId),
-      m_timestamp(std::chrono::system_clock::now()) {}
+      m_timestamp(std::chrono::system_clock::now()),
+      m_targetFilename(targetFilename) {}
 
 // Serialize the log entry into a byte vector
 std::vector<uint8_t> LogEntry::serialize() const
@@ -51,11 +55,16 @@ std::vector<uint8_t> LogEntry::serialize() const
         << m_userId << "|"
         << m_dataSubjectId << "|";
 
-    // Timestamp (convert to string)
+    // Timestamp (milliseconds since epoch)
     auto time_since_epoch = std::chrono::duration_cast<std::chrono::milliseconds>(m_timestamp.time_since_epoch()).count();
     oss << time_since_epoch << "|";
 
-    // Convert to string and then to a byte vector
+    // Optional filename
+    if (m_targetFilename)
+        oss << *m_targetFilename;
+    // Always end field
+    oss << "|";
+
     std::string logData = oss.str();
     return std::vector<uint8_t>(logData.begin(), logData.end());
 }
@@ -85,6 +94,14 @@ bool LogEntry::deserialize(const std::vector<uint8_t> &data)
         iss >> timestampMillis >> separator;
         m_timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(timestampMillis));
 
+        // Deserialize optional filename
+        std::string filename;
+        std::getline(iss, filename, '|');
+        if (!filename.empty())
+            m_targetFilename = filename;
+        else
+            m_targetFilename = std::nullopt;
+
         return true;
     }
     catch (const std::exception &e)
@@ -101,7 +118,10 @@ std::string LogEntry::toString() const
         << "DataLocation: " << m_dataLocation << "\n"
         << "UserId: " << m_userId << "\n"
         << "DataSubjectId: " << m_dataSubjectId << "\n"
-        << "Timestamp: " << std::chrono::system_clock::to_time_t(m_timestamp);
+        << "Timestamp: " << std::chrono::system_clock::to_time_t(m_timestamp) << "\n";
+
+    if (m_targetFilename)
+        oss << "TargetFilename: " << *m_targetFilename << "\n";
 
     return oss.str();
 }
