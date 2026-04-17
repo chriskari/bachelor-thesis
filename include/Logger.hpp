@@ -30,10 +30,6 @@ public:
                      BufferQueue::ProducerToken &token,
                      const std::optional<std::string> &filename = std::nullopt);
 
-    bool exportLogs(const std::string &outputPath,
-                    std::chrono::system_clock::time_point fromTimestamp = std::chrono::system_clock::time_point(),
-                    std::chrono::system_clock::time_point toTimestamp = std::chrono::system_clock::time_point());
-
     bool reset();
 
     ~Logger();

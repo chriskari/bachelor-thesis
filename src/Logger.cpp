@@ -134,24 +134,6 @@ bool Logger::reset()
     return true;
 }
 
-bool Logger::exportLogs(
-    const std::string &outputPath,
-    std::chrono::system_clock::time_point fromTimestamp,
-    std::chrono::system_clock::time_point toTimestamp)
-{
-    {
-        std::lock_guard<std::mutex> lock(m_stateMutex);
-        if (!m_initialized)
-        {
-            reportError("Logger not initialized");
-            return false;
-        }
-    }
-
-    reportError("Export logs functionality not implemented in Logger");
-    return false;
-}
-
 void Logger::reportError(const std::string &message)
 {
     std::cerr << "Logger Error: " << message << std::endl;

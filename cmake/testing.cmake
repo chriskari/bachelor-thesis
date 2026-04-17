@@ -14,6 +14,7 @@ set(TEST_SOURCES
     tests/integration/test_CompressionCrypto.cpp
     tests/integration/test_WriterQueue.cpp
     tests/integration/test_RoundTrip.cpp
+    tests/integration/test_Export.cpp
 )
 
 macro(add_test_suite TEST_NAME TEST_SOURCE)
@@ -43,3 +44,4 @@ add_test_suite(test_logging_manager tests/unit/test_LoggingManager.cpp)
 add_test_suite(test_compression_crypto tests/integration/test_CompressionCrypto.cpp)
 add_test_suite(test_writer_queue tests/integration/test_WriterQueue.cpp)
 add_test_suite(test_round_trip tests/integration/test_RoundTrip.cpp)
+add_test_suite(test_export tests/integration/test_Export.cpp)

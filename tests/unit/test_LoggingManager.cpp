@@ -128,6 +128,21 @@ TEST_F(LoggingManagerTest, ShutdownDrainHasNoInflightLoss)
     }
 }
 
+// With no segments on disk, export succeeds and produces an empty NDJSON file.
+TEST_F(LoggingManagerTest, ExportEmptyDirectoryProducesEmptyFile)
+{
+    LoggingConfig cfg = makeConfig();
+    cfg.useEncryption = true;
+
+    const std::string outputPath = testDir + "/empty.ndjson";
+    LoggingManager mgr(cfg);
+    // Don't start — directory exists (ctor creates it) but no segments were written.
+
+    EXPECT_TRUE(mgr.exportLogs(outputPath));
+    ASSERT_TRUE(std::filesystem::exists(outputPath));
+    EXPECT_EQ(std::filesystem::file_size(outputPath), 0u);
+}
+
 int main(int argc, char **argv)
 {
     ::testing::InitGoogleTest(&argc, argv);

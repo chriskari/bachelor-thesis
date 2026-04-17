@@ -1,6 +1,7 @@
 #include "Writer.hpp"
 #include "Crypto.hpp"
 #include "Compression.hpp"
+#include "PlaceholderCryptoMaterial.hpp"
 #include <iostream>
 #include <chrono>
 #include <optional>
@@ -58,8 +59,8 @@ void Writer::processLogEntries()
 
     Crypto crypto;
     Compression compression;
-    std::vector<uint8_t> encryptionKey(crypto.KEY_SIZE, 0x42); // placeholder
-    std::vector<uint8_t> dummyIV(crypto.GCM_IV_SIZE, 0x24);    // placeholder
+    std::vector<uint8_t> encryptionKey(crypto.KEY_SIZE, placeholder_crypto::KEY_BYTE);
+    std::vector<uint8_t> dummyIV(crypto.GCM_IV_SIZE, placeholder_crypto::IV_BYTE);
 
     // Reused across loop iterations so clear() keeps the underlying allocations.
     std::unordered_map<std::optional<std::string>, std::vector<LogEntry>> groupedEntries;

@@ -64,5 +64,19 @@ int main()
 
     loggingManager.stop();
 
+    // Export every persisted entry as NDJSON (one JSON object per line).
+    // Requires useEncryption == true and the system to be stopped.
+    const std::string fullExportPath = config.basePath + "/export_all.ndjson";
+    if (loggingManager.exportLogs(fullExportPath))
+        std::cout << "Exported all entries to " << fullExportPath << std::endl;
+
+    // GDPR subject-access example: narrow the export to a single data subject.
+    const std::string subjectExportPath = config.basePath + "/export_user02.ndjson";
+    if (loggingManager.exportLogs(subjectExportPath,
+                                  std::chrono::system_clock::time_point(),
+                                  std::chrono::system_clock::time_point(),
+                                  std::string("user02")))
+        std::cout << "Exported entries for subject 'user02' to " << subjectExportPath << std::endl;
+
     return 0;
 }

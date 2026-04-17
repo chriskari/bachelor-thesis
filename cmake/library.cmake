@@ -7,6 +7,7 @@ set(LIBRARY_SOURCES
     src/Writer.cpp
     src/SegmentedStorage.cpp
     src/LoggingManager.cpp
+    src/LogExporter.cpp
     benchmarks/BenchmarkUtils.cpp
 )
 

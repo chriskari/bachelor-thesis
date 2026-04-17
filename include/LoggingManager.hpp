@@ -34,7 +34,8 @@ public:
 
     bool exportLogs(const std::string &outputPath,
                     std::chrono::system_clock::time_point fromTimestamp = std::chrono::system_clock::time_point(),
-                    std::chrono::system_clock::time_point toTimestamp = std::chrono::system_clock::time_point());
+                    std::chrono::system_clock::time_point toTimestamp = std::chrono::system_clock::time_point(),
+                    const std::optional<std::string> &dataSubjectId = std::nullopt);
 
 private:
     std::shared_ptr<BufferQueue> m_queue;
@@ -51,6 +52,8 @@ private:
     size_t m_batchSize;
     bool m_useEncryption;
     int m_compressionLevel;
+    std::string m_basePath;
+    std::string m_baseFilename;
 };
 
 #endif

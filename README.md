@@ -7,7 +7,7 @@ Its impact lies in:
 
 - Enabling verifiable audit trails with minimal integration effort
 - Supporting GDPR accountability with high performance
-- Laying the groundwork for future improvements (e.g. key management, export)
+- Laying the groundwork for future improvements (e.g. key management)
 
 For an in-depth explanation of the design, implementation, and evaluation, please refer to the full [bachelor thesis](https://github.com/TUM-DSE/research-work-archive/blob/main/archive/2025/summer/docs/bsc_karidas.pdf) or the accompanying [presentation slides](https://github.com/TUM-DSE/research-work-archive/blob/main/archive/2025/summer/talks/bsc_karidas.pdf).
 
@@ -20,7 +20,7 @@ For an in-depth explanation of the design, implementation, and evaluation, pleas
 - **Compression before encryption** to reduce I/O overhead and storage costs.
 - **Authenticated encryption (AES-GCM)** to ensure confidentiality and integrity.
 - **Immutable, append-only storage** for compliance and auditability.
-- **Future-proof design** prepared for secure export and verification support.
+- **GDPR subject-access export** to NDJSON with optional time-range and subject-ID filtering.
 
 ## Security Scope and Limitations
 
@@ -28,8 +28,8 @@ The implementation is the artifact of a bachelor thesis focused on the system's 
 
 - **Key management is not implemented.** The writer path in [src/Writer.cpp](src/Writer.cpp) uses a hardcoded placeholder key and a static IV. This is _not_ cryptographically secure — reusing an IV with AES-GCM under the same key breaks the authentication guarantee. A production deployment must load the key from an external KMS or configuration and generate a fresh random IV per batch.
 - **No Additional Authenticated Data (AAD).** Segment metadata (filename, segment index, batch sequence) is not bound to the ciphertext. The "tamper-evident" property below therefore applies **per encrypted batch**, not across batches: an attacker with access to the log directory can reorder, replay, or truncate entire batches without the system detecting it. Binding segment metadata as AAD would close this gap.
-- **Tamper detection.** What _is_ guaranteed today: AES-GCM's per-batch authentication tag detects any bit-flip, truncation, or substitution within a single encrypted batch. Read-back (via `Crypto::decrypt`) raises `TamperDetectedException` on any such modification (see [tests/integration/test_RoundTrip.cpp](tests/integration/test_RoundTrip.cpp)).
-- **Export/read-back is partial.** The system can be read back by decrypting, decompressing, and deserializing segments (the round-trip integration test does this), but `LoggingManager::exportLogs` is a stub — a finished GDPR subject-access flow on top of the storage format is not part of this codebase.
+- **Tamper detection.** What _is_ guaranteed today: AES-GCM's per-batch authentication tag detects any bit-flip, truncation, or substitution within a single encrypted batch. Read-back (via `Crypto::decrypt`) raises `TamperDetectedException` on any such modification (see [tests/integration/test_RoundTrip.cpp](tests/integration/test_RoundTrip.cpp)). `LoggingManager::exportLogs` aborts with an error and deletes any partial output file on tag failure, so a tampered log cannot masquerade as a valid export.
+- **Export requires the system to be stopped.** `LoggingManager::exportLogs` must be called after `stop()`; it rejects calls while writers are active. This avoids partial-last-batch ambiguity and races against an in-flight rotation, at the cost of no live subject-access export. A streaming or snapshot-based concurrent export is left as future work.
 
 ## Setup and Usage
 
@@ -91,6 +91,25 @@ A simple usage example is provided in `/examples/main.cpp` that demonstrates how
 ./logging_example
 ```
 
+#### Exporting logs
+
+After stopping the system, `LoggingManager::exportLogs` emits NDJSON (one entry per line):
+
+```cpp
+LoggingManager mgr(cfg);
+mgr.start();
+// ... produce entries ...
+mgr.stop();
+
+// Export every entry for subject "subj_42":
+mgr.exportLogs("audit.ndjson",
+               std::chrono::system_clock::time_point(),   // from: unbounded
+               std::chrono::system_clock::time_point(),   // to:   unbounded
+               std::string("subj_42"));
+```
+
+Export requires `useEncryption = true` (the on-disk format is only self-framed under encryption) and the system to be stopped. Any AES-GCM tag failure aborts the export and removes the partial output file.
+
 #### Running Tests
 
 ```bash
@@ -115,7 +134,7 @@ nix-shell
 2. **Enqueuing**: Log entries are immediately enqueued into a thread-safe buffer, allowing the calling process to proceed without blocking on disk I/O or encryption tasks.
 3. **Batch Processing**: Dedicated writer threads continuously monitor the queue, dequeueing entries in bulk for optimized batch processing. Batched entries undergo serialization, compression and authenticated encryption (AES-GCM) for both confidentiality and integrity.
 4. **Persistent Storage**: Encrypted batches are concurrently written to append-only segment files. When a segment reaches its configured size limit, a new segment is automatically created.
-5. **Export and Verification**: _(Planned)_: Closed segments can be exported for audit purposes. The export process involves decryption, decompression, and verification of batch-level integrity using authentication tags and cryptographic chaining.
+5. **Export and Verification**: After the system is stopped, `LoggingManager::exportLogs` walks the segment directory, decrypts each batch, decompresses, deserializes, and emits the plaintext entries as NDJSON (one JSON object per line, payload bytes base64-encoded). The export can be narrowed with a time range and an optional `dataSubjectId` for GDPR Article 15 subject-access requests. AES-GCM tag failure during decryption aborts the export and removes the partial output file. Cross-batch verification chaining (detecting whole-batch reorder/replay/truncation) remains future work.
 
 ## Design Details
 

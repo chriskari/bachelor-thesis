@@ -206,27 +206,6 @@ TEST_F(LoggerTest, ShutdownWithWait)
     EXPECT_TRUE(queue->size() == 0);
 }
 
-// Test export logs without initialization
-TEST_F(LoggerTest, ExportLogsWithoutInitialization)
-{
-    Logger &logger = Logger::getInstance();
-
-    auto now = std::chrono::system_clock::now();
-    EXPECT_FALSE(logger.exportLogs("output.log", now, now));
-}
-
-// Test export logs after initialization (unimplemented)
-TEST_F(LoggerTest, ExportLogsAfterInitialization)
-{
-    Logger &logger = Logger::getInstance();
-    EXPECT_TRUE(logger.initialize(queue));
-
-    auto now = std::chrono::system_clock::now();
-    EXPECT_FALSE(logger.exportLogs("output.log", now, now));
-
-    EXPECT_TRUE(logger.reset());
-}
-
 // Test thread safety of singleton
 TEST_F(LoggerTest, ThreadSafetySingleton)
 {

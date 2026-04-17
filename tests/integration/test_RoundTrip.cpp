@@ -5,6 +5,7 @@
 #include "Crypto.hpp"
 #include "LogEntry.hpp"
 #include "LoggingManager.hpp"
+#include "PlaceholderCryptoMaterial.hpp"
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -13,13 +14,12 @@
 #include <thread>
 #include <vector>
 
-// Reads segments back manually (exportLogs is a stub) using the same placeholder
-// key/IV that Writer uses — real key management is out of scope here.
+// Reads segments back manually to assert the raw on-disk wire format, independent
+// of the LoggingManager::exportLogs path. Uses the same placeholder key/IV that
+// Writer uses — real key management is out of scope here.
 
 namespace
 {
-constexpr uint8_t kPlaceholderKeyByte = 0x42;
-constexpr uint8_t kPlaceholderIVByte = 0x24;
 
 std::vector<uint8_t> readFile(const std::string &path)
 {
@@ -53,8 +53,8 @@ std::vector<std::vector<uint8_t>> splitSegmentIntoBlobs(const std::vector<uint8_
 std::vector<LogEntry> decryptSegmentToEntries(const std::vector<uint8_t> &segment)
 {
     Crypto crypto;
-    std::vector<uint8_t> key(Crypto::KEY_SIZE, kPlaceholderKeyByte);
-    std::vector<uint8_t> iv(Crypto::GCM_IV_SIZE, kPlaceholderIVByte);
+    std::vector<uint8_t> key(Crypto::KEY_SIZE, placeholder_crypto::KEY_BYTE);
+    std::vector<uint8_t> iv(Crypto::GCM_IV_SIZE, placeholder_crypto::IV_BYTE);
 
     std::vector<LogEntry> out;
     for (auto &blob : splitSegmentIntoBlobs(segment))

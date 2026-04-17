@@ -1,6 +1,7 @@
 #include "LoggingManager.hpp"
 #include "Crypto.hpp"
 #include "Compression.hpp"
+#include "LogExporter.hpp"
 #include <iostream>
 #include <filesystem>
 
@@ -8,7 +9,9 @@ LoggingManager::LoggingManager(const LoggingConfig &config)
     : m_numWriterThreads(config.numWriterThreads),
       m_batchSize(config.batchSize),
       m_useEncryption(config.useEncryption),
-      m_compressionLevel(config.compressionLevel)
+      m_compressionLevel(config.compressionLevel),
+      m_basePath(config.basePath),
+      m_baseFilename(config.baseFilename)
 {
     // Zero/false are valid for useEncryption and compressionLevel, so they aren't checked.
     if (config.queueCapacity == 0)
@@ -172,8 +175,21 @@ bool LoggingManager::appendBatch(std::vector<LogEntry> entries,
 bool LoggingManager::exportLogs(
     const std::string &outputPath,
     std::chrono::system_clock::time_point fromTimestamp,
-    std::chrono::system_clock::time_point toTimestamp)
+    std::chrono::system_clock::time_point toTimestamp,
+    const std::optional<std::string> &dataSubjectId)
 {
-    std::cerr << "LoggingSystem: Export logs not fully implemented" << std::endl;
-    return false;
+    if (m_running.load(std::memory_order_acquire))
+    {
+        std::cerr << "LoggingSystem: exportLogs requires the system to be stopped first"
+                  << std::endl;
+        return false;
+    }
+
+    ExportFilter filter;
+    filter.from = fromTimestamp;
+    filter.to = toTimestamp;
+    filter.subjectId = dataSubjectId;
+
+    LogExporter exporter(m_basePath, m_useEncryption, m_compressionLevel);
+    return exporter.exportToNDJSON(outputPath, filter);
 }
