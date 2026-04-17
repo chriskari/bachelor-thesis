@@ -54,7 +54,8 @@ std::vector<uint8_t> Compression::compress(std::vector<uint8_t> &&data, int leve
 }
 
 // Helper function to decompress raw data using zlib
-std::vector<uint8_t> Compression::decompress(std::vector<uint8_t> &&compressedData)
+std::vector<uint8_t> Compression::decompress(std::vector<uint8_t> &&compressedData,
+                                             size_t maxDecompressedSize)
 {
     if (compressedData.empty())
     {
@@ -88,6 +89,12 @@ std::vector<uint8_t> Compression::decompress(std::vector<uint8_t> &&compressedDa
         {
             inflateEnd(&zs);
             throw std::runtime_error("Exception during zlib decompression");
+        }
+
+        if (zs.total_out > maxDecompressedSize)
+        {
+            inflateEnd(&zs);
+            throw std::runtime_error("Decompressed data exceeds maxDecompressedSize");
         }
 
         if (decompressedData.size() < zs.total_out)

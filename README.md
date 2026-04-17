@@ -22,6 +22,15 @@ For an in-depth explanation of the design, implementation, and evaluation, pleas
 - **Immutable, append-only storage** for compliance and auditability.
 - **Future-proof design** prepared for secure export and verification support.
 
+## Security Scope and Limitations
+
+The implementation is the artifact of a bachelor thesis focused on the system's architecture and performance; a few security-critical building blocks are deliberately placeholders and are **out of scope** for the current codebase:
+
+- **Key management is not implemented.** The writer path in [src/Writer.cpp](src/Writer.cpp) uses a hardcoded placeholder key and a static IV. This is _not_ cryptographically secure — reusing an IV with AES-GCM under the same key breaks the authentication guarantee. A production deployment must load the key from an external KMS or configuration and generate a fresh random IV per batch.
+- **No Additional Authenticated Data (AAD).** Segment metadata (filename, segment index, batch sequence) is not bound to the ciphertext. The "tamper-evident" property below therefore applies **per encrypted batch**, not across batches: an attacker with access to the log directory can reorder, replay, or truncate entire batches without the system detecting it. Binding segment metadata as AAD would close this gap.
+- **Tamper detection.** What _is_ guaranteed today: AES-GCM's per-batch authentication tag detects any bit-flip, truncation, or substitution within a single encrypted batch. Read-back (via `Crypto::decrypt`) raises `TamperDetectedException` on any such modification (see [tests/integration/test_RoundTrip.cpp](tests/integration/test_RoundTrip.cpp)).
+- **Export/read-back is partial.** The system can be read back by decrypting, decompressing, and deserializing segments (the round-trip integration test does this), but `LoggingManager::exportLogs` is a stub — a finished GDPR subject-access flow on top of the storage format is not part of this codebase.
+
 ## Setup and Usage
 
 ### Prerequisites
@@ -31,19 +40,35 @@ For an in-depth explanation of the design, implementation, and evaluation, pleas
 - Git (for submodule management)
 
 ### Dependencies
+
 Make sure the following libraries are available on your system:
+
 - OpenSSL - For cryptographic operations (AES-GCM encryption)
 - ZLIB - For compression functionality
 - Google Test (GTest) - For running unit and integration tests
 
+Install them on your platform:
+
+- **macOS (Homebrew):**
+  ```bash
+  brew install cmake openssl googletest
+  ```
+- **Debian / Ubuntu:**
+  ```bash
+  sudo apt-get install build-essential cmake libssl-dev zlib1g-dev libgtest-dev
+  ```
+- **Nix:** the included [shell.nix](shell.nix) provides everything — just run `nix-shell`.
+
 ### Building the System
 
 1. **Clone the repository with submodules:**
+
    ```bash
    git clone --recursive <repository-url>
    ```
 
 2. **If not cloned with `--recursive`, initialize submodules manually:**
+
    ```bash
    git submodule update --init --recursive
    ```
@@ -53,18 +78,21 @@ Make sure the following libraries are available on your system:
    mkdir build
    cd build
    cmake ..
-   make -j$(nproc)
+   make -j$(nproc 2>/dev/null || sysctl -n hw.logicalcpu)
    ```
+   The `nproc`/`sysctl` fallback picks the right job count on Linux or macOS. On macOS you can alternatively run `make -j$(sysctl -n hw.logicalcpu)` directly.
 
 ### Running the System
 
 A simple usage example is provided in `/examples/main.cpp` that demonstrates how to integrate and use the logging system:
+
 ```bash
 # Run the usage example
 ./logging_example
 ```
 
 #### Running Tests
+
 ```bash
 # Run all tests
 ctest
@@ -76,9 +104,11 @@ ctest
 ### Development Environment (Optional)
 
 A reproducible environment is provided using Nix:
+
 ```bash
 nix-shell
 ```
+
 ## System Workflow
 
 1. **Log Entry Submission**: When a database proxy intercepts a request to the underlying database involving personal data, it generates a structured log entry containing metadata such as operation type, key identifier, and timestamp. This entry is submitted to the logging API.

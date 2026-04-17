@@ -45,6 +45,10 @@ private:
         int fd{-1};
         std::atomic<size_t> segmentIndex{0};
         std::atomic<size_t> currentOffset{0};
+        // Incremented by rotateSegment. Writers snapshot this before reserving an offset
+        // and re-check it under shared_lock before pwriting; a mismatch means the segment
+        // the offset was reserved against has been rotated away, and the writer must retry.
+        std::atomic<size_t> generation{0};
         std::string currentSegmentPath;
         mutable std::shared_mutex fileMutex; // shared for writes, exclusive for rotate/flush
     };

@@ -42,6 +42,7 @@ private:
     std::vector<std::unique_ptr<Writer>> m_writers; // Multiple writer threads
     std::atomic<bool> m_running{false};             // System running state
     std::atomic<bool> m_acceptingEntries{false};    // Controls whether new entries are accepted
+    std::atomic<size_t> m_inflightAppends{0};       // Producers currently past the accepting-check
     std::mutex m_systemMutex;                       // For system-wide operations
 
     size_t m_numWriterThreads; // Number of writer threads

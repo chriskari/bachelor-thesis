@@ -10,6 +10,12 @@
 class LogEntry
 {
 public:
+    // Deserialization sanity caps — reject malformed inputs before allocating. These are
+    // deliberately generous relative to the GDPR log entries this system produces.
+    static constexpr size_t MAX_STRING_SIZE = 1 * 1024 * 1024;   // 1 MiB per string field
+    static constexpr size_t MAX_PAYLOAD_SIZE = 16 * 1024 * 1024; // 16 MiB per payload
+    static constexpr size_t MAX_ENTRY_SIZE = 32 * 1024 * 1024;   // 32 MiB per serialized entry
+
     enum class ActionType
     {
         CREATE,

@@ -75,26 +75,38 @@ void Writer::processLogEntries()
 
         for (auto &[targetFilename, entries] : groupedEntries)
         {
-            std::vector<uint8_t> processedData = LogEntry::serializeBatch(std::move(entries));
+            const size_t groupSize = entries.size();
+            try
+            {
+                std::vector<uint8_t> processedData = LogEntry::serializeBatch(std::move(entries));
 
-            // Apply compression if enabled
-            if (m_compressionLevel > 0)
-            {
-                processedData = Compression::compress(std::move(processedData), m_compressionLevel);
-            }
-            // Apply encryption if enabled
-            if (m_useEncryption)
-            {
-                processedData = crypto.encrypt(std::move(processedData), encryptionKey, dummyIV);
-            }
+                // Apply compression if enabled
+                if (m_compressionLevel > 0)
+                {
+                    processedData = Compression::compress(std::move(processedData), m_compressionLevel);
+                }
+                // Apply encryption if enabled
+                if (m_useEncryption)
+                {
+                    processedData = crypto.encrypt(std::move(processedData), encryptionKey, dummyIV);
+                }
 
-            if (targetFilename)
-            {
-                m_storage->writeToFile(*targetFilename, std::move(processedData));
+                if (targetFilename)
+                {
+                    m_storage->writeToFile(*targetFilename, std::move(processedData));
+                }
+                else
+                {
+                    m_storage->write(std::move(processedData));
+                }
             }
-            else
+            catch (const std::exception &e)
             {
-                m_storage->write(std::move(processedData));
+                // Drop this group, keep the writer alive so subsequent batches continue.
+                m_droppedEntries.fetch_add(groupSize, std::memory_order_acq_rel);
+                std::cerr << "Writer: dropped " << groupSize << " entries from "
+                          << (targetFilename ? *targetFilename : std::string("<default>"))
+                          << ": " << e.what() << std::endl;
             }
         }
 

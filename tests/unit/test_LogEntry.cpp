@@ -3,6 +3,8 @@
 #include <vector>
 #include <iostream>
 #include <chrono>
+#include <cstring>
+#include <limits>
 
 // Test default constructor
 TEST(LogEntryTest1, DefaultConstructor_InitializesCorrectly)
@@ -193,4 +195,51 @@ TEST(LogEntryTest5, BatchSerializationDeserialization_WorksCorrectly)
             std::chrono::system_clock::to_time_t(originalEntries[i].getTimestamp()),
             1);
     }
+}
+
+// Regression: a malformed batch with a huge entrySize must be rejected cleanly
+// (deserializeBatch returns an empty vector) instead of attempting a 4 GB allocation.
+TEST(LogEntryRegression, DeserializeBatchRejectsOversizedEntry)
+{
+    // numEntries=1, entrySize=UINT32_MAX — exceeds MAX_ENTRY_SIZE.
+    std::vector<uint8_t> malformed(sizeof(uint32_t) + sizeof(uint32_t), 0);
+    uint32_t numEntries = 1;
+    uint32_t entrySize = std::numeric_limits<uint32_t>::max();
+    std::memcpy(malformed.data(), &numEntries, sizeof(numEntries));
+    std::memcpy(malformed.data() + sizeof(numEntries), &entrySize, sizeof(entrySize));
+
+    auto recovered = LogEntry::deserializeBatch(std::move(malformed));
+    EXPECT_TRUE(recovered.empty()) << "Oversized entry must not produce a LogEntry";
+}
+
+// Regression: a single LogEntry with a huge declared payloadSize must cause
+// deserialize to return false, not allocate gigabytes.
+TEST(LogEntryRegression, DeserializeRejectsOversizedPayload)
+{
+    // Build a buffer with:
+    //   actionType (int), 4× empty strings (each uint32 length = 0),
+    //   timestamp (int64), payloadSize = MAX_PAYLOAD_SIZE + 1
+    std::vector<uint8_t> buf;
+    int actionType = static_cast<int>(LogEntry::ActionType::CREATE);
+    buf.insert(buf.end(),
+               reinterpret_cast<uint8_t *>(&actionType),
+               reinterpret_cast<uint8_t *>(&actionType) + sizeof(actionType));
+    for (int i = 0; i < 4; ++i)
+    {
+        uint32_t zero = 0;
+        buf.insert(buf.end(),
+                   reinterpret_cast<uint8_t *>(&zero),
+                   reinterpret_cast<uint8_t *>(&zero) + sizeof(zero));
+    }
+    int64_t ts = 0;
+    buf.insert(buf.end(),
+               reinterpret_cast<uint8_t *>(&ts),
+               reinterpret_cast<uint8_t *>(&ts) + sizeof(ts));
+    uint32_t bigSize = static_cast<uint32_t>(LogEntry::MAX_PAYLOAD_SIZE) + 1;
+    buf.insert(buf.end(),
+               reinterpret_cast<uint8_t *>(&bigSize),
+               reinterpret_cast<uint8_t *>(&bigSize) + sizeof(bigSize));
+
+    LogEntry entry;
+    EXPECT_FALSE(entry.deserialize(std::move(buf)));
 }

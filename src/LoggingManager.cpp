@@ -71,6 +71,16 @@ bool LoggingManager::stop()
 
     m_acceptingEntries.store(false, std::memory_order_release);
 
+    // Wait for producers that already passed the accepting-check to finish enqueuing.
+    // Pairs with the increment-then-check pattern in append()/appendBatch(): any producer
+    // that still observes acceptingEntries=true will have incremented m_inflightAppends
+    // before the check, and producers arriving after this barrier will see the flag as
+    // false. Spin rather than condvar — shutdown is rare and the inflight window is tiny.
+    while (m_inflightAppends.load(std::memory_order_acquire) > 0)
+    {
+        std::this_thread::yield();
+    }
+
     if (m_queue)
     {
         std::cout << "LoggingSystem: Waiting for queue to empty..." << std::endl;
@@ -102,10 +112,31 @@ BufferQueue::ProducerToken LoggingManager::createProducerToken()
     return Logger::getInstance().createProducerToken();
 }
 
+namespace
+{
+// Increment-then-check RAII guard. Must be constructed BEFORE reading m_acceptingEntries
+// so stop()'s wait on m_inflightAppends is correctly synchronized with producers in flight.
+struct InflightGuard
+{
+    std::atomic<size_t> &counter;
+    explicit InflightGuard(std::atomic<size_t> &c) : counter(c)
+    {
+        counter.fetch_add(1, std::memory_order_acq_rel);
+    }
+    ~InflightGuard()
+    {
+        counter.fetch_sub(1, std::memory_order_acq_rel);
+    }
+    InflightGuard(const InflightGuard &) = delete;
+    InflightGuard &operator=(const InflightGuard &) = delete;
+};
+} // namespace
+
 bool LoggingManager::append(LogEntry entry,
                             BufferQueue::ProducerToken &token,
                             const std::optional<std::string> &filename)
 {
+    InflightGuard guard(m_inflightAppends);
     if (!m_acceptingEntries.load(std::memory_order_acquire))
     {
         std::cerr << "LoggingSystem: Not accepting entries" << std::endl;
@@ -119,6 +150,7 @@ bool LoggingManager::appendBatch(std::vector<LogEntry> entries,
                                  BufferQueue::ProducerToken &token,
                                  const std::optional<std::string> &filename)
 {
+    InflightGuard guard(m_inflightAppends);
     if (!m_acceptingEntries.load(std::memory_order_acquire))
     {
         std::cerr << "LoggingSystem: Not accepting entries" << std::endl;

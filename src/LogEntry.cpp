@@ -1,7 +1,25 @@
 #include "LogEntry.hpp"
+#include "ByteOrder.hpp"
 #include <cstring>
 #include <stdexcept>
 #include <iostream>
+
+namespace
+{
+inline void appendLE32(std::vector<uint8_t> &v, uint32_t x)
+{
+    uint8_t buf[4];
+    byteorder::writeLE32(buf, x);
+    v.insert(v.end(), buf, buf + 4);
+}
+
+inline void appendLE64(std::vector<uint8_t> &v, uint64_t x)
+{
+    uint8_t buf[8];
+    byteorder::writeLE64(buf, x);
+    v.insert(v.end(), buf, buf + 8);
+}
+} // namespace
 
 LogEntry::LogEntry()
     : m_actionType(ActionType::CREATE),
@@ -28,42 +46,43 @@ LogEntry::LogEntry(ActionType actionType,
 {
 }
 
-// Move version that consumes the LogEntry
+// Wire format (little-endian, byte-order independent):
+//   actionType:  u32
+//   dataLocation, dataControllerId, dataProcessorId, dataSubjectId: each u32 length + bytes
+//   timestamp:   u64 (ms since epoch)
+//   payloadSize: u32
+//   payload:     payloadSize bytes
+// On x86_64 this produces the same bytes as the previous memcpy-based format; differences
+// only show up on big-endian hosts, which previously couldn't read files written on
+// little-endian hosts.
+
 std::vector<uint8_t> LogEntry::serialize() &&
 {
-    // Calculate required size upfront
     size_t totalSize =
-        sizeof(int) +                                  // ActionType
+        sizeof(uint32_t) +                             // ActionType
         sizeof(uint32_t) + m_dataLocation.size() +     // Size + data location
         sizeof(uint32_t) + m_dataControllerId.size() + // Size + data controller ID
         sizeof(uint32_t) + m_dataProcessorId.size() +  // Size + data processor ID
         sizeof(uint32_t) + m_dataSubjectId.size() +    // Size + data subject ID
-        sizeof(int64_t) +                              // Timestamp
+        sizeof(uint64_t) +                             // Timestamp
         sizeof(uint32_t) + m_payload.size();           // Size + payload data
 
-    // Pre-allocate the vector
     std::vector<uint8_t> result;
     result.reserve(totalSize);
 
-    // Push ActionType
-    int actionType = static_cast<int>(m_actionType);
-    appendToVector(result, &actionType, sizeof(actionType));
+    appendLE32(result, static_cast<uint32_t>(m_actionType));
 
-    // Move strings
     appendStringToVector(result, std::move(m_dataLocation));
     appendStringToVector(result, std::move(m_dataControllerId));
     appendStringToVector(result, std::move(m_dataProcessorId));
     appendStringToVector(result, std::move(m_dataSubjectId));
 
-    // Push timestamp
     int64_t timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
                             m_timestamp.time_since_epoch())
                             .count();
-    appendToVector(result, &timestamp, sizeof(timestamp));
+    appendLE64(result, static_cast<uint64_t>(timestamp));
 
-    // Move payload
-    uint32_t payloadSize = static_cast<uint32_t>(m_payload.size());
-    appendToVector(result, &payloadSize, sizeof(payloadSize));
+    appendLE32(result, static_cast<uint32_t>(m_payload.size()));
     if (!m_payload.empty())
     {
         result.insert(result.end(),
@@ -74,42 +93,33 @@ std::vector<uint8_t> LogEntry::serialize() &&
     return result;
 }
 
-// Const version for when you need to keep the LogEntry
 std::vector<uint8_t> LogEntry::serialize() const &
 {
-    // Calculate required size upfront
     size_t totalSize =
-        sizeof(int) +                                  // ActionType
+        sizeof(uint32_t) +                             // ActionType
         sizeof(uint32_t) + m_dataLocation.size() +     // Size + data location
         sizeof(uint32_t) + m_dataControllerId.size() + // Size + data controller  ID
         sizeof(uint32_t) + m_dataProcessorId.size() +  // Size + data processor  ID
         sizeof(uint32_t) + m_dataSubjectId.size() +    // Size + data subject ID
-        sizeof(int64_t) +                              // Timestamp
+        sizeof(uint64_t) +                             // Timestamp
         sizeof(uint32_t) + m_payload.size();           // Size + payload data
 
-    // Pre-allocate the vector
     std::vector<uint8_t> result;
     result.reserve(totalSize);
 
-    // Push ActionType
-    int actionType = static_cast<int>(m_actionType);
-    appendToVector(result, &actionType, sizeof(actionType));
+    appendLE32(result, static_cast<uint32_t>(m_actionType));
 
-    // Copy strings
     appendStringToVector(result, m_dataLocation);
     appendStringToVector(result, m_dataControllerId);
     appendStringToVector(result, m_dataProcessorId);
     appendStringToVector(result, m_dataSubjectId);
 
-    // Push timestamp
     int64_t timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
                             m_timestamp.time_since_epoch())
                             .count();
-    appendToVector(result, &timestamp, sizeof(timestamp));
+    appendLE64(result, static_cast<uint64_t>(timestamp));
 
-    // Copy payload
-    uint32_t payloadSize = static_cast<uint32_t>(m_payload.size());
-    appendToVector(result, &payloadSize, sizeof(payloadSize));
+    appendLE32(result, static_cast<uint32_t>(m_payload.size()));
     if (!m_payload.empty())
     {
         appendToVector(result, m_payload.data(), m_payload.size());
@@ -124,48 +134,37 @@ bool LogEntry::deserialize(std::vector<uint8_t> &&data)
     {
         size_t offset = 0;
 
-        // Check if we have enough data for the basic structure
-        if (data.size() < sizeof(int))
+        if (data.size() < sizeof(uint32_t))
             return false;
 
-        // Extract action type
-        int actionType;
-        std::memcpy(&actionType, data.data() + offset, sizeof(actionType));
-        offset += sizeof(actionType);
+        uint32_t actionType = byteorder::readLE32(data.data() + offset);
+        offset += sizeof(uint32_t);
         m_actionType = static_cast<ActionType>(actionType);
 
-        // Extract data location
         if (!extractStringFromVector(data, offset, m_dataLocation))
             return false;
-
-        // Extract data controller ID
         if (!extractStringFromVector(data, offset, m_dataControllerId))
             return false;
-
-        // Extract data processor ID
         if (!extractStringFromVector(data, offset, m_dataProcessorId))
             return false;
-
-        // Extract data subject ID
         if (!extractStringFromVector(data, offset, m_dataSubjectId))
             return false;
 
-        // Extract timestamp
-        if (offset + sizeof(int64_t) > data.size())
+        if (offset + sizeof(uint64_t) > data.size())
             return false;
 
-        int64_t timestamp;
-        std::memcpy(&timestamp, data.data() + offset, sizeof(timestamp));
-        offset += sizeof(timestamp);
+        int64_t timestamp = static_cast<int64_t>(byteorder::readLE64(data.data() + offset));
+        offset += sizeof(uint64_t);
         m_timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(timestamp));
 
-        // Extract payload
         if (offset + sizeof(uint32_t) > data.size())
             return false;
 
-        uint32_t payloadSize;
-        std::memcpy(&payloadSize, data.data() + offset, sizeof(payloadSize));
-        offset += sizeof(payloadSize);
+        uint32_t payloadSize = byteorder::readLE32(data.data() + offset);
+        offset += sizeof(uint32_t);
+
+        if (payloadSize > MAX_PAYLOAD_SIZE)
+            return false;
 
         if (offset + payloadSize > data.size())
             return false;
@@ -198,26 +197,22 @@ std::vector<uint8_t> LogEntry::serializeBatch(std::vector<LogEntry> &&entries)
 {
     if (entries.empty())
     {
-        // Just return a vector with count = 0
         std::vector<uint8_t> batchData(sizeof(uint32_t));
-        uint32_t numEntries = 0;
-        std::memcpy(batchData.data(), &numEntries, sizeof(numEntries));
+        byteorder::writeLE32(batchData.data(), 0);
         return batchData;
     }
 
-    // Pre-calculate approximate total size to minimize reallocations
-    size_t estimatedSize = sizeof(uint32_t); // Number of entries
+    size_t estimatedSize = sizeof(uint32_t);
     for (const auto &entry : entries)
     {
-        // Rough estimate: header size + string sizes + payload size
         estimatedSize += sizeof(uint32_t) +     // Entry size field
-                         sizeof(int) +          // ActionType
+                         sizeof(uint32_t) +     // ActionType
                          3 * sizeof(uint32_t) + // 3 string length fields
                          entry.getDataLocation().size() +
                          entry.getDataControllerId().size() +
                          entry.getDataProcessorId().size() +
                          entry.getDataSubjectId().size() +
-                         sizeof(int64_t) +  // Timestamp
+                         sizeof(uint64_t) + // Timestamp
                          sizeof(uint32_t) + // Payload size
                          entry.getPayload().size();
     }
@@ -225,24 +220,12 @@ std::vector<uint8_t> LogEntry::serializeBatch(std::vector<LogEntry> &&entries)
     std::vector<uint8_t> batchData;
     batchData.reserve(estimatedSize);
 
-    // Store the number of entries
-    uint32_t numEntries = static_cast<uint32_t>(entries.size());
-    batchData.resize(sizeof(numEntries));
-    std::memcpy(batchData.data(), &numEntries, sizeof(numEntries));
+    appendLE32(batchData, static_cast<uint32_t>(entries.size()));
 
-    // Serialize and append each entry using move semantics
     for (auto &entry : entries)
     {
-        // Move-serialize the entry
         std::vector<uint8_t> entryData = std::move(entry).serialize();
-
-        // Store the size of the serialized entry
-        uint32_t entrySize = static_cast<uint32_t>(entryData.size());
-        size_t currentSize = batchData.size();
-        batchData.resize(currentSize + sizeof(entrySize));
-        std::memcpy(batchData.data() + currentSize, &entrySize, sizeof(entrySize));
-
-        // Move the serialized entry data
+        appendLE32(batchData, static_cast<uint32_t>(entryData.size()));
         batchData.insert(batchData.end(),
                          std::make_move_iterator(entryData.begin()),
                          std::make_move_iterator(entryData.end()));
@@ -257,42 +240,36 @@ std::vector<LogEntry> LogEntry::deserializeBatch(std::vector<uint8_t> &&batchDat
 
     try
     {
-        // Read the number of entries
         if (batchData.size() < sizeof(uint32_t))
         {
             throw std::runtime_error("Batch data too small to contain entry count");
         }
 
-        uint32_t numEntries;
-        std::memcpy(&numEntries, batchData.data(), sizeof(numEntries));
-
-        // Reserve space for entries to avoid reallocations
+        uint32_t numEntries = byteorder::readLE32(batchData.data());
         entries.reserve(numEntries);
 
-        // Position in the batch data
-        size_t position = sizeof(numEntries);
+        size_t position = sizeof(uint32_t);
 
-        // Extract each entry
         for (uint32_t i = 0; i < numEntries; ++i)
         {
-            // Check if we have enough data left to read the entry size
             if (position + sizeof(uint32_t) > batchData.size())
             {
                 throw std::runtime_error("Unexpected end of batch data");
             }
 
-            // Read the size of the entry
-            uint32_t entrySize;
-            std::memcpy(&entrySize, batchData.data() + position, sizeof(entrySize));
-            position += sizeof(entrySize);
+            uint32_t entrySize = byteorder::readLE32(batchData.data() + position);
+            position += sizeof(uint32_t);
 
-            // Check if we have enough data left to read the entry
+            if (entrySize > MAX_ENTRY_SIZE)
+            {
+                throw std::runtime_error("Entry size exceeds MAX_ENTRY_SIZE");
+            }
+
             if (position + entrySize > batchData.size())
             {
                 throw std::runtime_error("Unexpected end of batch data");
             }
 
-            // Create entry data by moving a slice from the batch data
             std::vector<uint8_t> entryData;
             entryData.reserve(entrySize);
 
@@ -302,7 +279,6 @@ std::vector<LogEntry> LogEntry::deserializeBatch(std::vector<uint8_t> &&batchDat
                              std::make_move_iterator(end_it));
             position += entrySize;
 
-            // Deserialize the entry using move semantics
             LogEntry entry;
             if (entry.deserialize(std::move(entryData)))
             {
@@ -322,49 +298,41 @@ std::vector<LogEntry> LogEntry::deserializeBatch(std::vector<uint8_t> &&batchDat
     return entries;
 }
 
-// Helper method to append data to a vector
 void LogEntry::appendToVector(std::vector<uint8_t> &vec, const void *data, size_t size) const
 {
     const uint8_t *bytes = static_cast<const uint8_t *>(data);
     vec.insert(vec.end(), bytes, bytes + size);
 }
 
-// Helper method to append a string with its length (const version)
 void LogEntry::appendStringToVector(std::vector<uint8_t> &vec, const std::string &str) const
 {
-    uint32_t length = static_cast<uint32_t>(str.size());
-    appendToVector(vec, &length, sizeof(length));
-
-    if (length > 0)
+    appendLE32(vec, static_cast<uint32_t>(str.size()));
+    if (!str.empty())
     {
         appendToVector(vec, str.data(), str.size());
     }
 }
 
-// Helper method to append a string with its length (move version)
 void LogEntry::appendStringToVector(std::vector<uint8_t> &vec, std::string &&str)
 {
-    uint32_t length = static_cast<uint32_t>(str.size());
-    appendToVector(vec, &length, sizeof(length));
-
-    if (length > 0)
+    appendLE32(vec, static_cast<uint32_t>(str.size()));
+    if (!str.empty())
     {
         vec.insert(vec.end(), str.begin(), str.end());
     }
 }
 
-// Helper method to extract a string from a vector
 bool LogEntry::extractStringFromVector(std::vector<uint8_t> &vec, size_t &offset, std::string &str)
 {
-    // Check if we have enough data for the string length
     if (offset + sizeof(uint32_t) > vec.size())
         return false;
 
-    uint32_t length;
-    std::memcpy(&length, vec.data() + offset, sizeof(length));
-    offset += sizeof(length);
+    uint32_t length = byteorder::readLE32(vec.data() + offset);
+    offset += sizeof(uint32_t);
 
-    // Check if we have enough data for the string content
+    if (length > MAX_STRING_SIZE)
+        return false;
+
     if (offset + length > vec.size())
         return false;
 

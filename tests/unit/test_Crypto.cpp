@@ -148,57 +148,38 @@ TEST_F(CryptoTest, InvalidIVSize)
     EXPECT_THROW(crypto.encrypt(std::move(data), key, longIV), std::runtime_error);
 }
 
-// Test decryption with wrong key
+// Test decryption with wrong key — must raise TamperDetectedException.
 TEST_F(CryptoTest, WrongKey)
 {
     std::string testMessage = "This should not decrypt correctly with wrong key";
     std::vector<uint8_t> data = stringToBytes(testMessage);
     std::vector<uint8_t> iv = createDummyIV();
 
-    // Create two different keys
     std::vector<uint8_t> correctKey = createRandomKey();
     std::vector<uint8_t> wrongKey = createRandomKey();
-
-    // Make sure the keys are different
     ASSERT_NE(correctKey, wrongKey);
 
-    // Encrypt with the correct key
     std::vector<uint8_t> encrypted = crypto.encrypt(std::move(data), correctKey, iv);
-
-    // Attempt to decrypt with the wrong key
-    std::vector<uint8_t> decrypted = crypto.decrypt(encrypted, wrongKey, iv);
-
-    // The decryption should fail (return empty vector) or the result should be different
-    // from the original data
-    EXPECT_TRUE(decrypted.empty() || decrypted != data);
+    EXPECT_THROW(crypto.decrypt(encrypted, wrongKey, iv), TamperDetectedException);
 }
 
-// Test decryption with wrong IV
+// Test decryption with wrong IV — must raise TamperDetectedException.
 TEST_F(CryptoTest, WrongIV)
 {
     std::string testMessage = "This should not decrypt correctly with wrong IV";
     std::vector<uint8_t> data = stringToBytes(testMessage);
     std::vector<uint8_t> key = createRandomKey();
 
-    // Create two different IVs
     std::vector<uint8_t> correctIV = createDummyIV();
-    std::vector<uint8_t> wrongIV(Crypto::GCM_IV_SIZE, 0x42); // Different value
-
-    // Make sure the IVs are different
+    std::vector<uint8_t> wrongIV(Crypto::GCM_IV_SIZE, 0x42);
     ASSERT_NE(correctIV, wrongIV);
 
-    // Encrypt with the correct IV
     std::vector<uint8_t> encrypted = crypto.encrypt(std::move(data), key, correctIV);
-
-    // Attempt to decrypt with the wrong IV
-    std::vector<uint8_t> decrypted = crypto.decrypt(encrypted, key, wrongIV);
-
-    // The decryption should fail (return empty vector) or the result should be different
-    // from the original data
-    EXPECT_TRUE(decrypted.empty() || decrypted != data);
+    EXPECT_THROW(crypto.decrypt(encrypted, key, wrongIV), TamperDetectedException);
 }
 
-// Test tampering detection
+// Test tampering detection — flipping a byte in the ciphertext must raise
+// TamperDetectedException, not silently return empty.
 TEST_F(CryptoTest, TamperingDetection)
 {
     std::string testMessage = "This message should be protected against tampering";
@@ -206,19 +187,13 @@ TEST_F(CryptoTest, TamperingDetection)
     std::vector<uint8_t> key = createRandomKey();
     std::vector<uint8_t> iv = createDummyIV();
 
-    // Encrypt the data
     std::vector<uint8_t> encrypted = crypto.encrypt(std::move(data), key, iv);
     ASSERT_FALSE(encrypted.empty());
+    ASSERT_GT(encrypted.size(), 20u);
 
-    // Tamper with the encrypted data (modify a byte in the middle)
-    if (encrypted.size() > 20)
-    {
-        encrypted[encrypted.size() / 2] ^= 0xFF; // Flip all bits in one byte
+    encrypted[encrypted.size() / 2] ^= 0xFF;
 
-        // Decryption should now fail or produce incorrect results
-        std::vector<uint8_t> decrypted = crypto.decrypt(encrypted, key, iv);
-        EXPECT_TRUE(decrypted.empty() || decrypted != data);
-    }
+    EXPECT_THROW(crypto.decrypt(encrypted, key, iv), TamperDetectedException);
 }
 
 // Test binary data encryption and decryption

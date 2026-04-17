@@ -1,3 +1,6 @@
 /build/
 .vscode/
 notes.md
+CLAUDE.md
+/benchmarks/results.txt
+/benchmarks/local/

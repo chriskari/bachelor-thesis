@@ -9,9 +9,11 @@ set(TEST_SOURCES
     tests/unit/test_Crypto.cpp
     tests/unit/test_Writer.cpp
     tests/unit/test_SegmentedStorage.cpp
+    tests/unit/test_LoggingManager.cpp
     # integration tests
     tests/integration/test_CompressionCrypto.cpp
     tests/integration/test_WriterQueue.cpp
+    tests/integration/test_RoundTrip.cpp
 )
 
 macro(add_test_suite TEST_NAME TEST_SOURCE)
@@ -36,6 +38,8 @@ add_test_suite(test_compression tests/unit/test_Compression.cpp)
 add_test_suite(test_crypto tests/unit/test_Crypto.cpp)
 add_test_suite(test_writer tests/unit/test_Writer.cpp)
 add_test_suite(test_segmented_storage tests/unit/test_SegmentedStorage.cpp)
+add_test_suite(test_logging_manager tests/unit/test_LoggingManager.cpp)
 # integration tests
 add_test_suite(test_compression_crypto tests/integration/test_CompressionCrypto.cpp)
 add_test_suite(test_writer_queue tests/integration/test_WriterQueue.cpp)
+add_test_suite(test_round_trip tests/integration/test_RoundTrip.cpp)

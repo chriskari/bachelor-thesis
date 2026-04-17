@@ -174,6 +174,7 @@ TEST_F(SegmentedStorageTest, ConcurrentWriteTest)
 
     std::vector<std::thread> threads;
     std::vector<std::vector<uint8_t>> dataBlocks;
+    dataBlocks.reserve(numThreads);
 
     for (size_t i = 0; i < numThreads; i++)
     {
@@ -207,6 +208,11 @@ TEST_F(SegmentedStorageTest, ConcurrentWriteWithRotationTest)
 
     std::vector<std::thread> threads;
     std::vector<std::vector<uint8_t>> dataBlocks;
+    // Reserve capacity so later push_backs don't reallocate the outer vector. Without
+    // this, a writer thread holding an rvalue reference to dataBlocks[i] could have that
+    // reference dangle after the main thread's push_back moves the elements to a new
+    // backing buffer, causing pwrite to read from freed memory (EFAULT).
+    dataBlocks.reserve(numThreads);
 
     for (size_t i = 0; i < numThreads; i++)
     {
@@ -369,6 +375,7 @@ TEST_F(SegmentedStorageTest, RealisticConcurrencyRotationTest)
 
     std::vector<std::thread> threads;
     std::vector<std::vector<uint8_t>> dataBlocks;
+    dataBlocks.reserve(numThreads);
 
     for (size_t i = 0; i < numThreads; i++)
     {
@@ -627,6 +634,52 @@ TEST_F(SegmentedStorageTest, MultiSegmentBoundaryTest)
     for (const auto &file : files)
     {
         ASSERT_EQ(getFileSize(file), maxSegmentSize);
+    }
+}
+
+// Regression: LRU eviction must not close an fd while a concurrent writer is holding
+// shared_lock on the entry's fileMutex. maxOpenFiles=2 forces constant eviction while
+// six filenames cycle through as writers hammer pwrite. Prior to the fix this would
+// race and either corrupt data or throw "pwrite failed" (EBADF) intermittently.
+TEST_F(SegmentedStorageTest, LRUEvictionUnderConcurrentWrites)
+{
+    const size_t maxOpenFiles = 2;
+    SegmentedStorage storage(testPath, baseFilename,
+                             /*maxSegmentSize*/ 1024 * 1024,
+                             /*maxAttempts*/ 5,
+                             /*baseRetryDelay*/ std::chrono::milliseconds(1),
+                             maxOpenFiles);
+
+    const size_t numFilenames = 6;
+    const size_t writesPerFilename = 200;
+    const size_t dataSize = 64;
+
+    std::vector<std::thread> threads;
+    for (size_t i = 0; i < numFilenames; i++)
+    {
+        threads.emplace_back([&, i]()
+                             {
+            for (size_t j = 0; j < writesPerFilename; j++)
+            {
+                auto data = generateRandomData(dataSize);
+                storage.writeToFile("evict_file_" + std::to_string(i), std::move(data));
+            } });
+    }
+
+    for (auto &t : threads)
+        t.join();
+
+    storage.flush();
+
+    // Each filename's segments must contain exactly writesPerFilename * dataSize bytes.
+    for (size_t i = 0; i < numFilenames; i++)
+    {
+        auto files = getSegmentFiles(testPath, "evict_file_" + std::to_string(i));
+        size_t total = 0;
+        for (const auto &f : files)
+            total += getFileSize(f);
+        EXPECT_EQ(total, writesPerFilename * dataSize)
+            << "evict_file_" << i << ": data lost under LRU pressure";
     }
 }
 
