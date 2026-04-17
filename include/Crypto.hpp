@@ -30,17 +30,14 @@ public:
     static constexpr size_t GCM_TAG_SIZE = 16;
 
     std::vector<uint8_t> encrypt(std::vector<uint8_t> &&plaintext,
-                                 const std::vector<uint8_t> &key,
-                                 const std::vector<uint8_t> &iv);
+                                 const std::vector<uint8_t> &key);
     void encrypt(const uint8_t *plaintext, size_t plaintextLen,
                  const std::vector<uint8_t> &key,
-                 const std::vector<uint8_t> &iv,
                  std::vector<uint8_t> &out);
 
     // Throws TamperDetectedException on tag failure; std::runtime_error on everything else.
     std::vector<uint8_t> decrypt(const std::vector<uint8_t> &encryptedData,
-                                 const std::vector<uint8_t> &key,
-                                 const std::vector<uint8_t> &iv);
+                                 const std::vector<uint8_t> &key);
 };
 
 #endif

@@ -126,7 +126,7 @@ std::vector<uint8_t> readFile(const std::string &path)
     return buf;
 }
 
-// Returns the list of [u32 size][ciphertext][GCM_TAG] blob spans. Each element
+// Returns the list of [u32 size][IV][ciphertext][GCM_TAG] blob spans. Each element
 // is a pair of (byteOffsetInSegment, blobBytes) so we can report the offset on
 // tamper.
 struct Blob
@@ -142,7 +142,7 @@ std::vector<Blob> splitSegmentIntoBlobs(const std::vector<uint8_t> &segment)
     while (pos + sizeof(uint32_t) <= segment.size())
     {
         uint32_t ciphertextSize = byteorder::readLE32(segment.data() + pos);
-        size_t blobSize = sizeof(uint32_t) + ciphertextSize + Crypto::GCM_TAG_SIZE;
+        size_t blobSize = sizeof(uint32_t) + Crypto::GCM_IV_SIZE + ciphertextSize + Crypto::GCM_TAG_SIZE;
         if (pos + blobSize > segment.size())
             break;
         blobs.push_back({pos, std::vector<uint8_t>(segment.begin() + pos,
@@ -238,7 +238,6 @@ bool LogExporter::exportToNDJSON(const std::string &outputPath, const ExportFilt
     Crypto crypto;
     Compression compression;
     const std::vector<uint8_t> key(Crypto::KEY_SIZE, placeholder_crypto::KEY_BYTE);
-    const std::vector<uint8_t> iv(Crypto::GCM_IV_SIZE, placeholder_crypto::IV_BYTE);
 
     for (const auto &segmentPath : listSegments(m_basePath))
     {
@@ -251,7 +250,7 @@ bool LogExporter::exportToNDJSON(const std::string &outputPath, const ExportFilt
             std::vector<uint8_t> plaintext;
             try
             {
-                plaintext = crypto.decrypt(blob.bytes, key, iv);
+                plaintext = crypto.decrypt(blob.bytes, key);
             }
             catch (const TamperDetectedException &e)
             {

@@ -3,15 +3,16 @@
 
 #include <cstdint>
 
-// Placeholder AES-256-GCM key and IV used by Writer when encrypting, and by
+// Placeholder AES-256-GCM key used by Writer when encrypting, and by
 // LogExporter / round-trip tests when decrypting. Key management is out of
 // scope for this codebase (see README "Security Scope and Limitations") — a
-// production deployment must source the key from a KMS and use a fresh IV per
-// batch. Centralized here so writer and reader paths cannot drift.
+// production deployment must source the key from a KMS. Centralized here so
+// writer and reader paths cannot drift. IVs are generated freshly per batch
+// inside Crypto::encrypt via RAND_bytes and embedded in the ciphertext wire
+// format, so no placeholder IV is needed.
 namespace placeholder_crypto
 {
 constexpr uint8_t KEY_BYTE = 0x42;
-constexpr uint8_t IV_BYTE = 0x24;
 } // namespace placeholder_crypto
 
 #endif

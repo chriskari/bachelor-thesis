@@ -18,10 +18,9 @@ protected:
         entry2 = LogEntry(LogEntry::ActionType::READ, "/data/records/2", "controller456", "processor456", "subject456");
         entry3 = LogEntry(LogEntry::ActionType::UPDATE, "/data/records/3", "controller789", "processor789", "subject789");
 
-        // Create encryption key and IV
+        // Create encryption key
         key = std::vector<uint8_t>(32, 0x42);      // Fixed key for reproducibility
         wrongKey = std::vector<uint8_t>(32, 0x24); // Different key for testing
-        dummyIV = std::vector<uint8_t>(12, 0x24);  // Fixed IV for reproducibility
     }
 
     // Helper function to compare two LogEntry objects
@@ -33,7 +32,6 @@ protected:
     LogEntry entry1, entry2, entry3;
     std::vector<uint8_t> key;
     std::vector<uint8_t> wrongKey;
-    std::vector<uint8_t> dummyIV;
 };
 
 // Batch processing - original -> compress -> encrypt -> decrypt -> decompress -> recovered
@@ -44,11 +42,11 @@ TEST_F(CompressionCryptoTest, BatchProcessing)
     std::vector<uint8_t> compressed = Compression{}.compress(std::move(serializedBatch));
     ASSERT_GT(compressed.size(), 0);
 
-    std::vector<uint8_t> encrypted = crypto.encrypt(std::move(compressed), key, dummyIV);
+    std::vector<uint8_t> encrypted = crypto.encrypt(std::move(compressed), key);
     ASSERT_GT(encrypted.size(), 0);
     EXPECT_NE(encrypted, compressed);
 
-    std::vector<uint8_t> decrypted = crypto.decrypt(encrypted, key, dummyIV);
+    std::vector<uint8_t> decrypted = crypto.decrypt(encrypted, key);
     ASSERT_GT(decrypted.size(), 0);
     EXPECT_EQ(decrypted, compressed);
 
@@ -66,8 +64,8 @@ TEST_F(CompressionCryptoTest, BatchProcessing)
     std::vector<LogEntry> emptyBatch;
     std::vector<uint8_t> emptySerializedBatch = LogEntry::serializeBatch(std::move(emptyBatch));
     std::vector<uint8_t> emptyCompressed = Compression{}.compress(std::move(emptySerializedBatch));
-    std::vector<uint8_t> emptyEncrypted = crypto.encrypt(std::move(emptyCompressed), key, dummyIV);
-    std::vector<uint8_t> emptyDecrypted = crypto.decrypt(emptyEncrypted, key, dummyIV);
+    std::vector<uint8_t> emptyEncrypted = crypto.encrypt(std::move(emptyCompressed), key);
+    std::vector<uint8_t> emptyDecrypted = crypto.decrypt(emptyEncrypted, key);
     std::vector<uint8_t> emptyDecompressed = Compression{}.decompress(std::move(emptyDecrypted));
     std::vector<LogEntry> emptyRecovered = LogEntry::deserializeBatch(std::move(emptyDecompressed));
     EXPECT_TRUE(emptyRecovered.empty());
@@ -76,8 +74,8 @@ TEST_F(CompressionCryptoTest, BatchProcessing)
     std::vector<LogEntry> singleBatch = {entry1};
     std::vector<uint8_t> singleSerializedBatch = LogEntry::serializeBatch(std::move(singleBatch));
     std::vector<uint8_t> singleCompressed = Compression{}.compress(std::move(singleSerializedBatch));
-    std::vector<uint8_t> singleEncrypted = crypto.encrypt(std::move(singleCompressed), key, dummyIV);
-    std::vector<uint8_t> singleDecrypted = crypto.decrypt(singleEncrypted, key, dummyIV);
+    std::vector<uint8_t> singleEncrypted = crypto.encrypt(std::move(singleCompressed), key);
+    std::vector<uint8_t> singleDecrypted = crypto.decrypt(singleEncrypted, key);
     std::vector<uint8_t> singleDecompressed = Compression{}.decompress(std::move(singleDecrypted));
     std::vector<LogEntry> singleRecovered = LogEntry::deserializeBatch(std::move(singleDecompressed));
     ASSERT_EQ(1, singleRecovered.size());

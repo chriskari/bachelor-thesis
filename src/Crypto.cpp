@@ -36,10 +36,10 @@ Crypto::~Crypto()
     EVP_cleanup();
 }
 
-// Wire format (little-endian): [u32 dataSize][ciphertext, dataSize bytes][tag, GCM_TAG_SIZE bytes]
+// Wire format (little-endian): [u32 dataSize][iv, GCM_IV_SIZE bytes][ciphertext, dataSize bytes][tag, GCM_TAG_SIZE bytes]
+// A fresh random IV is generated per call via RAND_bytes and embedded in the output — never reuse an IV under the same key.
 void Crypto::encrypt(const uint8_t *plaintext, size_t plaintextLen,
                      const std::vector<uint8_t> &key,
-                     const std::vector<uint8_t> &iv,
                      std::vector<uint8_t> &out)
 {
     out.clear();
@@ -48,33 +48,39 @@ void Crypto::encrypt(const uint8_t *plaintext, size_t plaintextLen,
         return;
     if (key.size() != KEY_SIZE)
         throw std::runtime_error("Invalid key size");
-    if (iv.size() != GCM_IV_SIZE)
-        throw std::runtime_error("Invalid IV size");
-
-    EVP_CIPHER_CTX_reset(m_encryptCtx);
-
-    if (EVP_EncryptInit_ex(m_encryptCtx, EVP_aes_256_gcm(), nullptr, key.data(), iv.data()) != 1)
-    {
-        throw std::runtime_error("Failed to initialize encryption");
-    }
 
     const size_t sizeFieldSize = sizeof(uint32_t);
     const size_t ciphertextSize = plaintextLen;
-    const size_t totalSize = sizeFieldSize + ciphertextSize + GCM_TAG_SIZE;
+    const size_t totalSize = sizeFieldSize + GCM_IV_SIZE + ciphertextSize + GCM_TAG_SIZE;
 
     out.resize(totalSize);
 
     byteorder::writeLE32(out.data(), static_cast<uint32_t>(ciphertextSize));
 
+    uint8_t *ivPtr = out.data() + sizeFieldSize;
+    if (RAND_bytes(ivPtr, GCM_IV_SIZE) != 1)
+    {
+        throw std::runtime_error("Failed to generate random IV");
+    }
+
+    EVP_CIPHER_CTX_reset(m_encryptCtx);
+
+    if (EVP_EncryptInit_ex(m_encryptCtx, EVP_aes_256_gcm(), nullptr, key.data(), ivPtr) != 1)
+    {
+        throw std::runtime_error("Failed to initialize encryption");
+    }
+
+    const size_t ciphertextOffset = sizeFieldSize + GCM_IV_SIZE;
+
     int encryptedLen = 0;
-    if (EVP_EncryptUpdate(m_encryptCtx, out.data() + sizeFieldSize, &encryptedLen,
+    if (EVP_EncryptUpdate(m_encryptCtx, out.data() + ciphertextOffset, &encryptedLen,
                           plaintext, plaintextLen) != 1)
     {
         throw std::runtime_error("Failed during encryption update");
     }
 
     int finalLen = 0;
-    if (EVP_EncryptFinal_ex(m_encryptCtx, out.data() + sizeFieldSize + encryptedLen, &finalLen) != 1)
+    if (EVP_EncryptFinal_ex(m_encryptCtx, out.data() + ciphertextOffset + encryptedLen, &finalLen) != 1)
     {
         throw std::runtime_error("Failed to finalize encryption");
     }
@@ -85,24 +91,22 @@ void Crypto::encrypt(const uint8_t *plaintext, size_t plaintextLen,
     }
 
     if (EVP_CIPHER_CTX_ctrl(m_encryptCtx, EVP_CTRL_GCM_GET_TAG, GCM_TAG_SIZE,
-                            out.data() + sizeFieldSize + ciphertextSize) != 1)
+                            out.data() + ciphertextOffset + ciphertextSize) != 1)
     {
         throw std::runtime_error("Failed to get authentication tag");
     }
 }
 
 std::vector<uint8_t> Crypto::encrypt(std::vector<uint8_t> &&plaintext,
-                                     const std::vector<uint8_t> &key,
-                                     const std::vector<uint8_t> &iv)
+                                     const std::vector<uint8_t> &key)
 {
     std::vector<uint8_t> out;
-    encrypt(plaintext.data(), plaintext.size(), key, iv, out);
+    encrypt(plaintext.data(), plaintext.size(), key, out);
     return out;
 }
 
 std::vector<uint8_t> Crypto::decrypt(const std::vector<uint8_t> &encryptedData,
-                                     const std::vector<uint8_t> &key,
-                                     const std::vector<uint8_t> &iv)
+                                     const std::vector<uint8_t> &key)
 {
     if (encryptedData.empty())
     {
@@ -114,18 +118,16 @@ std::vector<uint8_t> Crypto::decrypt(const std::vector<uint8_t> &encryptedData,
         throw std::runtime_error("Invalid key size. Expected 32 bytes for AES-256");
     }
 
-    if (iv.size() != GCM_IV_SIZE)
+    if (encryptedData.size() < sizeof(uint32_t) + GCM_IV_SIZE)
     {
-        throw std::runtime_error("Invalid IV size. Expected 12 bytes for GCM");
-    }
-
-    if (encryptedData.size() < sizeof(uint32_t))
-    {
-        throw std::runtime_error("Encrypted data too small - missing data size");
+        throw std::runtime_error("Encrypted data too small - missing size field or IV");
     }
 
     uint32_t dataSize = byteorder::readLE32(encryptedData.data());
     size_t position = sizeof(uint32_t);
+
+    const uint8_t *ivPtr = encryptedData.data() + position;
+    position += GCM_IV_SIZE;
 
     if (position + dataSize > encryptedData.size())
     {
@@ -146,7 +148,7 @@ std::vector<uint8_t> Crypto::decrypt(const std::vector<uint8_t> &encryptedData,
 
     EVP_CIPHER_CTX_reset(m_decryptCtx);
 
-    if (EVP_DecryptInit_ex(m_decryptCtx, EVP_aes_256_gcm(), nullptr, key.data(), iv.data()) != 1)
+    if (EVP_DecryptInit_ex(m_decryptCtx, EVP_aes_256_gcm(), nullptr, key.data(), ivPtr) != 1)
     {
         throw std::runtime_error("Failed to initialize decryption");
     }

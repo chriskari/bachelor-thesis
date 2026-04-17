@@ -60,7 +60,6 @@ void Writer::processLogEntries()
     Crypto crypto;
     Compression compression;
     std::vector<uint8_t> encryptionKey(crypto.KEY_SIZE, placeholder_crypto::KEY_BYTE);
-    std::vector<uint8_t> dummyIV(crypto.GCM_IV_SIZE, placeholder_crypto::IV_BYTE);
 
     // Reused across loop iterations so clear() keeps the underlying allocations.
     std::unordered_map<std::optional<std::string>, std::vector<LogEntry>> groupedEntries;
@@ -98,7 +97,7 @@ void Writer::processLogEntries()
                 }
                 if (m_useEncryption)
                 {
-                    crypto.encrypt(current->data(), current->size(), encryptionKey, dummyIV, *other);
+                    crypto.encrypt(current->data(), current->size(), encryptionKey, *other);
                     std::swap(current, other);
                 }
 

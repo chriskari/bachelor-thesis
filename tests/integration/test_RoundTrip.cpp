@@ -33,7 +33,7 @@ std::vector<uint8_t> readFile(const std::string &path)
     return buf;
 }
 
-// Blob wire format: [u32 ciphertextSize][ciphertext][GCM_TAG_SIZE bytes tag].
+// Blob wire format: [u32 ciphertextSize][IV, GCM_IV_SIZE bytes][ciphertext][GCM_TAG_SIZE bytes tag].
 std::vector<std::vector<uint8_t>> splitSegmentIntoBlobs(const std::vector<uint8_t> &segment)
 {
     std::vector<std::vector<uint8_t>> blobs;
@@ -41,7 +41,7 @@ std::vector<std::vector<uint8_t>> splitSegmentIntoBlobs(const std::vector<uint8_
     while (pos + sizeof(uint32_t) <= segment.size())
     {
         uint32_t ciphertextSize = byteorder::readLE32(segment.data() + pos);
-        size_t blobSize = sizeof(uint32_t) + ciphertextSize + Crypto::GCM_TAG_SIZE;
+        size_t blobSize = sizeof(uint32_t) + Crypto::GCM_IV_SIZE + ciphertextSize + Crypto::GCM_TAG_SIZE;
         if (pos + blobSize > segment.size())
             break;
         blobs.emplace_back(segment.begin() + pos, segment.begin() + pos + blobSize);
@@ -54,12 +54,11 @@ std::vector<LogEntry> decryptSegmentToEntries(const std::vector<uint8_t> &segmen
 {
     Crypto crypto;
     std::vector<uint8_t> key(Crypto::KEY_SIZE, placeholder_crypto::KEY_BYTE);
-    std::vector<uint8_t> iv(Crypto::GCM_IV_SIZE, placeholder_crypto::IV_BYTE);
 
     std::vector<LogEntry> out;
     for (auto &blob : splitSegmentIntoBlobs(segment))
     {
-        auto plaintext = crypto.decrypt(blob, key, iv);
+        auto plaintext = crypto.decrypt(blob, key);
         auto decompressed = Compression{}.decompress(std::move(plaintext));
         auto entries = LogEntry::deserializeBatch(std::move(decompressed));
         for (auto &e : entries)
