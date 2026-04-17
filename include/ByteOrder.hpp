@@ -6,6 +6,18 @@
 // Little-endian byte helpers so the on-disk wire format is host-independent.
 namespace byteorder
 {
+inline void writeLE16(uint8_t *dst, uint16_t v) noexcept
+{
+    dst[0] = static_cast<uint8_t>(v);
+    dst[1] = static_cast<uint8_t>(v >> 8);
+}
+
+inline uint16_t readLE16(const uint8_t *src) noexcept
+{
+    return static_cast<uint16_t>(src[0]) |
+           (static_cast<uint16_t>(src[1]) << 8);
+}
+
 inline void writeLE32(uint8_t *dst, uint32_t v) noexcept
 {
     dst[0] = static_cast<uint8_t>(v);

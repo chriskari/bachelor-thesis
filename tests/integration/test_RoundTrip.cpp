@@ -6,8 +6,10 @@
 #include "LogEntry.hpp"
 #include "LoggingManager.hpp"
 #include "PlaceholderCryptoMaterial.hpp"
+#include "SealMarker.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -33,7 +35,7 @@ std::vector<uint8_t> readFile(const std::string &path)
     return buf;
 }
 
-// Blob wire format: [u32 ciphertextSize][IV, GCM_IV_SIZE bytes][ciphertext][GCM_TAG_SIZE bytes tag].
+// Blob wire format: [u32 ciphertextSize][u64 seqnum][IV, GCM_IV_SIZE bytes][ciphertext][GCM_TAG_SIZE bytes tag].
 std::vector<std::vector<uint8_t>> splitSegmentIntoBlobs(const std::vector<uint8_t> &segment)
 {
     std::vector<std::vector<uint8_t>> blobs;
@@ -41,7 +43,8 @@ std::vector<std::vector<uint8_t>> splitSegmentIntoBlobs(const std::vector<uint8_
     while (pos + sizeof(uint32_t) <= segment.size())
     {
         uint32_t ciphertextSize = byteorder::readLE32(segment.data() + pos);
-        size_t blobSize = sizeof(uint32_t) + Crypto::GCM_IV_SIZE + ciphertextSize + Crypto::GCM_TAG_SIZE;
+        size_t blobSize = sizeof(uint32_t) + Crypto::SEQNUM_SIZE + Crypto::GCM_IV_SIZE +
+                          ciphertextSize + Crypto::GCM_TAG_SIZE;
         if (pos + blobSize > segment.size())
             break;
         blobs.emplace_back(segment.begin() + pos, segment.begin() + pos + blobSize);
@@ -50,7 +53,10 @@ std::vector<std::vector<uint8_t>> splitSegmentIntoBlobs(const std::vector<uint8_
     return blobs;
 }
 
-std::vector<LogEntry> decryptSegmentToEntries(const std::vector<uint8_t> &segment)
+// `target` is the filename stem the Writer used to build AAD; passing empty
+// would fail the GCM tag check.
+std::vector<LogEntry> decryptSegmentToEntries(const std::vector<uint8_t> &segment,
+                                              const std::string &target)
 {
     Crypto crypto;
     std::vector<uint8_t> key(Crypto::KEY_SIZE, placeholder_crypto::KEY_BYTE);
@@ -58,8 +64,15 @@ std::vector<LogEntry> decryptSegmentToEntries(const std::vector<uint8_t> &segmen
     std::vector<LogEntry> out;
     for (auto &blob : splitSegmentIntoBlobs(segment))
     {
-        auto plaintext = crypto.decrypt(blob, key);
+        auto plaintext = crypto.decrypt(blob, key,
+                                        reinterpret_cast<const uint8_t *>(target.data()),
+                                        target.size());
         auto decompressed = Compression{}.decompress(std::move(plaintext));
+        if (decompressed.size() == seal_marker::MAGIC_LEN &&
+            std::memcmp(decompressed.data(), seal_marker::MAGIC, seal_marker::MAGIC_LEN) == 0)
+        {
+            continue;
+        }
         auto entries = LogEntry::deserializeBatch(std::move(decompressed));
         for (auto &e : entries)
             out.emplace_back(std::move(e));
@@ -157,7 +170,7 @@ TEST_F(RoundTripTest, ProducesRecoverableEntries)
     for (const auto &f : files)
     {
         auto segment = readFile(f);
-        auto entries = decryptSegmentToEntries(segment);
+        auto entries = decryptSegmentToEntries(segment, "rt");
         for (auto &e : entries)
             recovered.emplace_back(std::move(e));
     }
@@ -198,7 +211,7 @@ TEST_F(RoundTripTest, TamperingInSegmentIsDetected)
     ASSERT_GT(segment.size(), 32u);
     segment[10] ^= 0xFF;
 
-    EXPECT_THROW(decryptSegmentToEntries(segment), TamperDetectedException);
+    EXPECT_THROW(decryptSegmentToEntries(segment, "rt"), TamperDetectedException);
 }
 
 int main(int argc, char **argv)

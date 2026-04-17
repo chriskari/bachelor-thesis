@@ -3,18 +3,28 @@
 #include "Compression.hpp"
 #include "Crypto.hpp"
 #include "PlaceholderCryptoMaterial.hpp"
+#include "SealMarker.hpp"
 #include <openssl/evp.h>
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <utility>
 
 namespace
 {
+bool isSealPlaintext(const std::vector<uint8_t> &plaintext)
+{
+    if (plaintext.size() != seal_marker::MAGIC_LEN)
+        return false;
+    return std::memcmp(plaintext.data(), seal_marker::MAGIC, seal_marker::MAGIC_LEN) == 0;
+}
+
 const char *actionTypeName(LogEntry::ActionType t)
 {
     switch (t)
@@ -126,9 +136,6 @@ std::vector<uint8_t> readFile(const std::string &path)
     return buf;
 }
 
-// Returns the list of [u32 size][IV][ciphertext][GCM_TAG] blob spans. Each element
-// is a pair of (byteOffsetInSegment, blobBytes) so we can report the offset on
-// tamper.
 struct Blob
 {
     size_t offset;
@@ -142,7 +149,8 @@ std::vector<Blob> splitSegmentIntoBlobs(const std::vector<uint8_t> &segment)
     while (pos + sizeof(uint32_t) <= segment.size())
     {
         uint32_t ciphertextSize = byteorder::readLE32(segment.data() + pos);
-        size_t blobSize = sizeof(uint32_t) + Crypto::GCM_IV_SIZE + ciphertextSize + Crypto::GCM_TAG_SIZE;
+        size_t blobSize = sizeof(uint32_t) + Crypto::SEQNUM_SIZE + Crypto::GCM_IV_SIZE +
+                          ciphertextSize + Crypto::GCM_TAG_SIZE;
         if (pos + blobSize > segment.size())
             break;
         blobs.push_back({pos, std::vector<uint8_t>(segment.begin() + pos,
@@ -150,6 +158,22 @@ std::vector<Blob> splitSegmentIntoBlobs(const std::vector<uint8_t> &segment)
         pos += blobSize;
     }
     return blobs;
+}
+
+// Filename layout "<target>_YYYYMMDD_HHMMSS_NNNNNN.log" — strip the three trailing
+// underscore-separated fields to recover the target name used for AAD binding.
+std::string parseTargetFromSegmentPath(const std::string &path)
+{
+    std::filesystem::path p(path);
+    std::string stem = p.stem().string();
+    for (int i = 0; i < 3; ++i)
+    {
+        auto pos = stem.rfind('_');
+        if (pos == std::string::npos)
+            return stem;
+        stem.resize(pos);
+    }
+    return stem;
 }
 
 std::vector<std::string> listSegments(const std::string &dir)
@@ -201,6 +225,21 @@ void writeNdjsonLine(std::ostream &out, const LogEntry &e)
     line.append("\"}\n");
     out.write(line.data(), static_cast<std::streamsize>(line.size()));
 }
+
+struct DecodedBatch
+{
+    uint64_t seqnum;
+    std::vector<LogEntry> entries;
+    std::string segmentPath;
+    size_t blobOffset;
+};
+
+struct TargetState
+{
+    std::vector<DecodedBatch> batches;
+    bool sealSeen = false;
+    uint64_t sealSeqnum = 0;
+};
 } // namespace
 
 LogExporter::LogExporter(std::string basePath, bool useEncryption, int compressionLevel)
@@ -239,24 +278,43 @@ bool LogExporter::exportToNDJSON(const std::string &outputPath, const ExportFilt
     Compression compression;
     const std::vector<uint8_t> key(Crypto::KEY_SIZE, placeholder_crypto::KEY_BYTE);
 
+    std::map<std::string, TargetState> perTarget;
+
     for (const auto &segmentPath : listSegments(m_basePath))
     {
         auto segment = readFile(segmentPath);
         if (segment.empty())
             continue;
 
+        const std::string target = parseTargetFromSegmentPath(segmentPath);
+        TargetState &state = perTarget[target];
+
         for (const auto &blob : splitSegmentIntoBlobs(segment))
         {
+            uint64_t seqnum = 0;
+            if (!Crypto::peekSeqnum(blob.bytes, seqnum))
+            {
+                std::ostringstream msg;
+                msg << "malformed blob (too small for header) in " << segmentPath
+                    << " at offset " << blob.offset;
+                abortAndCleanup(msg.str());
+                return false;
+            }
+
             std::vector<uint8_t> plaintext;
             try
             {
-                plaintext = crypto.decrypt(blob.bytes, key);
+                plaintext = crypto.decrypt(blob.bytes, key,
+                                           reinterpret_cast<const uint8_t *>(target.data()),
+                                           target.size());
             }
             catch (const TamperDetectedException &e)
             {
                 std::ostringstream msg;
                 msg << "tamper detected in " << segmentPath
-                    << " at offset " << blob.offset << ": " << e.what();
+                    << " at offset " << blob.offset
+                    << " (seqnum " << seqnum << ", target '" << target << "'): "
+                    << e.what();
                 abortAndCleanup(msg.str());
                 return false;
             }
@@ -290,6 +348,22 @@ bool LogExporter::exportToNDJSON(const std::string &outputPath, const ExportFilt
                 serialized = std::move(plaintext);
             }
 
+            if (isSealPlaintext(serialized))
+            {
+                if (state.sealSeen && state.sealSeqnum != seqnum)
+                {
+                    std::ostringstream msg;
+                    msg << "multiple seal batches with different seqnums for target '"
+                        << target << "' (" << state.sealSeqnum << " and " << seqnum
+                        << ") — log may have been spliced";
+                    abortAndCleanup(msg.str());
+                    return false;
+                }
+                state.sealSeen = true;
+                state.sealSeqnum = seqnum;
+                continue;
+            }
+
             std::vector<LogEntry> entries;
             try
             {
@@ -304,7 +378,65 @@ bool LogExporter::exportToNDJSON(const std::string &outputPath, const ExportFilt
                 return false;
             }
 
-            for (const auto &e : entries)
+            state.batches.push_back(DecodedBatch{seqnum, std::move(entries),
+                                                 segmentPath, blob.offset});
+        }
+    }
+
+    for (auto &[target, state] : perTarget)
+    {
+        auto &batches = state.batches;
+        std::sort(batches.begin(), batches.end(),
+                  [](const DecodedBatch &a, const DecodedBatch &b)
+                  { return a.seqnum < b.seqnum; });
+
+        for (size_t i = 0; i < batches.size(); ++i)
+        {
+            const uint64_t expected = static_cast<uint64_t>(i);
+            if (batches[i].seqnum != expected)
+            {
+                std::ostringstream msg;
+                if (i + 1 < batches.size() && batches[i + 1].seqnum == batches[i].seqnum)
+                {
+                    msg << "duplicate seqnum " << batches[i].seqnum
+                        << " for target '" << target << "'";
+                }
+                else
+                {
+                    msg << "seqnum gap for target '" << target
+                        << "': expected " << expected
+                        << ", got " << batches[i].seqnum;
+                }
+                abortAndCleanup(msg.str());
+                return false;
+            }
+        }
+
+        if (state.sealSeen)
+        {
+            const uint64_t expectedDataCount = state.sealSeqnum;
+            if (batches.size() != expectedDataCount)
+            {
+                std::ostringstream msg;
+                msg << "target '" << target << "' truncated: seal reports "
+                    << expectedDataCount << " batches but "
+                    << batches.size() << " present";
+                abortAndCleanup(msg.str());
+                return false;
+            }
+        }
+        else if (!batches.empty())
+        {
+            // Missing seal = crash before shutdown (or an attacker dropped it).
+            // Tail-truncation is undetectable in this case; partial export continues.
+            std::cerr << "LogExporter: warning — no seal batch for target '"
+                      << target << "' (tail truncation cannot be detected)"
+                      << std::endl;
+        }
+
+        for (const auto &batch : batches)
+        {
+            for (const auto &e : batch.entries)
             {
                 if (passesFilter(e, filter))
                     writeNdjsonLine(out, e);

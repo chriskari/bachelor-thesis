@@ -12,9 +12,14 @@ Writer::Writer(BufferQueue &queue,
                std::shared_ptr<SegmentedStorage> storage,
                size_t batchSize,
                bool useEncryption,
-               int compressionLevel)
+               int compressionLevel,
+               std::shared_ptr<SeqnumAllocator> seqnumAllocator,
+               std::string baseFilename)
     : m_queue(queue),
       m_storage(std::move(storage)),
+      m_seqnumAllocator(seqnumAllocator ? std::move(seqnumAllocator)
+                                        : std::make_shared<SeqnumAllocator>()),
+      m_baseFilename(std::move(baseFilename)),
       m_batchSize(batchSize),
       m_useEncryption(useEncryption),
       m_compressionLevel(compressionLevel),
@@ -86,6 +91,11 @@ void Writer::processLogEntries()
             const size_t groupSize = entries.size();
             try
             {
+                // Must match what the exporter parses from the segment filename,
+                // otherwise AAD reconstruction fails the tag check.
+                const std::string &resolvedTarget =
+                    targetFilename ? *targetFilename : m_baseFilename;
+
                 LogEntry::serializeBatch(std::move(entries), scratchA);
                 std::vector<uint8_t> *current = &scratchA;
                 std::vector<uint8_t> *other = &scratchB;
@@ -97,7 +107,11 @@ void Writer::processLogEntries()
                 }
                 if (m_useEncryption)
                 {
-                    crypto.encrypt(current->data(), current->size(), encryptionKey, *other);
+                    const uint64_t seqnum = m_seqnumAllocator->next(resolvedTarget);
+                    crypto.encrypt(current->data(), current->size(), encryptionKey, *other,
+                                   seqnum,
+                                   reinterpret_cast<const uint8_t *>(resolvedTarget.data()),
+                                   resolvedTarget.size());
                     std::swap(current, other);
                 }
 

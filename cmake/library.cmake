@@ -4,6 +4,7 @@ set(LIBRARY_SOURCES
     src/BufferQueue.cpp
     src/Compression.cpp
     src/Crypto.cpp
+    src/SeqnumAllocator.cpp
     src/Writer.cpp
     src/SegmentedStorage.cpp
     src/LoggingManager.cpp

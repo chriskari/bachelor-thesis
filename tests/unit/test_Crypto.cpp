@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "Crypto.hpp"
+#include <cstring>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -140,10 +141,95 @@ TEST_F(CryptoTest, TamperingIV)
     std::vector<uint8_t> encrypted = crypto.encrypt(std::move(data), key);
     ASSERT_FALSE(encrypted.empty());
 
-    // Flip a bit in the IV field (offset 4..16 in the wire format).
-    encrypted[sizeof(uint32_t)] ^= 0xFF;
+    const size_t ivOffset = sizeof(uint32_t) + Crypto::SEQNUM_SIZE;
+    encrypted[ivOffset] ^= 0xFF;
 
     EXPECT_THROW(crypto.decrypt(encrypted, key), TamperDetectedException);
+}
+
+TEST_F(CryptoTest, TamperingSeqnumField)
+{
+    std::string testMessage = "Seqnum tamper test";
+    std::vector<uint8_t> data = stringToBytes(testMessage);
+    std::vector<uint8_t> key = createRandomKey();
+
+    std::vector<uint8_t> encrypted;
+    crypto.encrypt(data.data(), data.size(), key, encrypted,
+                   /*seqnum=*/42, nullptr, 0);
+    ASSERT_FALSE(encrypted.empty());
+
+    encrypted[sizeof(uint32_t)] ^= 0x01;
+
+    EXPECT_THROW(crypto.decrypt(encrypted, key, nullptr, 0), TamperDetectedException);
+}
+
+TEST_F(CryptoTest, TargetNameMismatchDetected)
+{
+    std::string testMessage = "Target mismatch test";
+    std::vector<uint8_t> data = stringToBytes(testMessage);
+    std::vector<uint8_t> key = createRandomKey();
+
+    const std::string targetA = "fileA";
+    const std::string targetB = "fileB";
+
+    std::vector<uint8_t> encrypted;
+    crypto.encrypt(data.data(), data.size(), key, encrypted,
+                   /*seqnum=*/7,
+                   reinterpret_cast<const uint8_t *>(targetA.data()), targetA.size());
+
+    EXPECT_THROW(crypto.decrypt(encrypted, key,
+                                reinterpret_cast<const uint8_t *>(targetB.data()),
+                                targetB.size()),
+                 TamperDetectedException);
+}
+
+TEST_F(CryptoTest, SeqnumAndTargetRoundTrip)
+{
+    std::string testMessage = "Round trip with seqnum + target";
+    std::vector<uint8_t> data = stringToBytes(testMessage);
+    std::vector<uint8_t> key = createRandomKey();
+
+    const std::string target = "my_target_file";
+    const uint64_t seqnum = 12345;
+
+    std::vector<uint8_t> encrypted;
+    crypto.encrypt(data.data(), data.size(), key, encrypted,
+                   seqnum,
+                   reinterpret_cast<const uint8_t *>(target.data()), target.size());
+    ASSERT_FALSE(encrypted.empty());
+
+    uint64_t peeked = 0;
+    ASSERT_TRUE(Crypto::peekSeqnum(encrypted, peeked));
+    EXPECT_EQ(peeked, seqnum);
+
+    std::vector<uint8_t> decrypted = crypto.decrypt(
+        encrypted, key,
+        reinterpret_cast<const uint8_t *>(target.data()), target.size());
+    EXPECT_EQ(data, decrypted);
+}
+
+TEST_F(CryptoTest, SeqnumSpliceAcrossBlobsRejected)
+{
+    std::vector<uint8_t> data = stringToBytes("abcdefghij");
+    std::vector<uint8_t> key = createRandomKey();
+    const std::string target = "t";
+
+    std::vector<uint8_t> blobA;
+    std::vector<uint8_t> blobB;
+    crypto.encrypt(data.data(), data.size(), key, blobA, 1,
+                   reinterpret_cast<const uint8_t *>(target.data()), target.size());
+    crypto.encrypt(data.data(), data.size(), key, blobB, 2,
+                   reinterpret_cast<const uint8_t *>(target.data()), target.size());
+
+    // Claim blob B is at position 1; its tag was computed for seqnum=2.
+    std::memcpy(blobB.data() + sizeof(uint32_t),
+                blobA.data() + sizeof(uint32_t),
+                Crypto::SEQNUM_SIZE);
+
+    EXPECT_THROW(crypto.decrypt(blobB, key,
+                                reinterpret_cast<const uint8_t *>(target.data()),
+                                target.size()),
+                 TamperDetectedException);
 }
 
 TEST_F(CryptoTest, BinaryData)

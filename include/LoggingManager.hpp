@@ -5,6 +5,7 @@
 #include "Logger.hpp"
 #include "BufferQueue.hpp"
 #include "SegmentedStorage.hpp"
+#include "SeqnumAllocator.hpp"
 #include "Writer.hpp"
 #include "LogEntry.hpp"
 #include <memory>
@@ -40,6 +41,7 @@ public:
 private:
     std::shared_ptr<BufferQueue> m_queue;
     std::shared_ptr<SegmentedStorage> m_storage;
+    std::shared_ptr<SeqnumAllocator> m_seqnumAllocator;
     std::vector<std::unique_ptr<Writer>> m_writers;
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_acceptingEntries{false};

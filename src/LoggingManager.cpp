@@ -2,8 +2,11 @@
 #include "Crypto.hpp"
 #include "Compression.hpp"
 #include "LogExporter.hpp"
+#include "PlaceholderCryptoMaterial.hpp"
+#include "SealMarker.hpp"
 #include <iostream>
 #include <filesystem>
+#include <vector>
 
 LoggingManager::LoggingManager(const LoggingConfig &config)
     : m_numWriterThreads(config.numWriterThreads),
@@ -40,6 +43,7 @@ LoggingManager::LoggingManager(const LoggingConfig &config)
         config.maxAttempts,
         config.baseRetryDelay,
         config.maxOpenFiles);
+    m_seqnumAllocator = std::make_shared<SeqnumAllocator>();
 
     Logger::getInstance().initialize(m_queue, config.appendTimeout);
 
@@ -66,7 +70,10 @@ bool LoggingManager::start()
 
     for (size_t i = 0; i < m_numWriterThreads; ++i)
     {
-        auto writer = std::make_unique<Writer>(*m_queue, m_storage, m_batchSize, m_useEncryption, m_compressionLevel);
+        auto writer = std::make_unique<Writer>(*m_queue, m_storage,
+                                               m_batchSize,
+                                               m_useEncryption, m_compressionLevel,
+                                               m_seqnumAllocator, m_baseFilename);
         writer->start();
         m_writers.push_back(std::move(writer));
     }
@@ -106,6 +113,49 @@ bool LoggingManager::stop()
         writer->stop();
     }
     m_writers.clear();
+
+    // Seal each target with a batch at seqnum == count, giving the exporter a
+    // high-water-mark for tail-truncation detection.
+    if (m_useEncryption && m_seqnumAllocator && m_storage)
+    {
+        try
+        {
+            Crypto crypto;
+            Compression compression;
+            const std::vector<uint8_t> key(Crypto::KEY_SIZE, placeholder_crypto::KEY_BYTE);
+
+            for (const auto &[target, count] : m_seqnumAllocator->snapshot())
+            {
+                if (count == 0)
+                    continue;
+
+                std::vector<uint8_t> plaintext(seal_marker::MAGIC,
+                                               seal_marker::MAGIC + seal_marker::MAGIC_LEN);
+                std::vector<uint8_t> scratch;
+                std::vector<uint8_t> *current = &plaintext;
+                std::vector<uint8_t> *other = &scratch;
+
+                if (m_compressionLevel > 0)
+                {
+                    compression.compress(current->data(), current->size(),
+                                         *other, m_compressionLevel);
+                    std::swap(current, other);
+                }
+
+                std::vector<uint8_t> encrypted;
+                crypto.encrypt(current->data(), current->size(), key, encrypted,
+                               /*seqnum=*/count,
+                               reinterpret_cast<const uint8_t *>(target.data()),
+                               target.size());
+                m_storage->writeToFile(target, encrypted.data(), encrypted.size());
+            }
+        }
+        catch (const std::exception &e)
+        {
+            std::cerr << "LoggingSystem: failed to write seal batch: " << e.what()
+                      << std::endl;
+        }
+    }
 
     if (m_storage)
     {

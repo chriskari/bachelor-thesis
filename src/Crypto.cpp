@@ -36,11 +36,46 @@ Crypto::~Crypto()
     EVP_cleanup();
 }
 
-// Wire format (little-endian): [u32 dataSize][iv, GCM_IV_SIZE bytes][ciphertext, dataSize bytes][tag, GCM_TAG_SIZE bytes]
-// A fresh random IV is generated per call via RAND_bytes and embedded in the output — never reuse an IV under the same key.
+std::vector<uint8_t> Crypto::buildAad(uint64_t seqnum,
+                                      const uint8_t *targetName,
+                                      size_t targetNameLen)
+{
+    if (targetNameLen > 0xFFFFu)
+    {
+        throw std::runtime_error("Target name too long for AAD (max 65535 bytes)");
+    }
+
+    std::vector<uint8_t> aad(SEQNUM_SIZE + sizeof(uint16_t) + targetNameLen);
+    byteorder::writeLE64(aad.data(), seqnum);
+    byteorder::writeLE16(aad.data() + SEQNUM_SIZE, static_cast<uint16_t>(targetNameLen));
+    if (targetNameLen > 0)
+    {
+        std::memcpy(aad.data() + SEQNUM_SIZE + sizeof(uint16_t), targetName, targetNameLen);
+    }
+    return aad;
+}
+
+bool Crypto::peekSeqnum(const uint8_t *encryptedData, size_t encryptedLen, uint64_t &outSeqnum)
+{
+    if (encryptedLen < sizeof(uint32_t) + SEQNUM_SIZE)
+        return false;
+    outSeqnum = byteorder::readLE64(encryptedData + sizeof(uint32_t));
+    return true;
+}
+
+bool Crypto::peekSeqnum(const std::vector<uint8_t> &encryptedData, uint64_t &outSeqnum)
+{
+    return peekSeqnum(encryptedData.data(), encryptedData.size(), outSeqnum);
+}
+
+// Wire format (little-endian):
+//   [u32 dataSize][u64 seqnum][iv GCM_IV_SIZE][ciphertext dataSize][tag GCM_TAG_SIZE]
+// Fresh random IV per call; seqnum + target name are bound into the GCM AAD.
 void Crypto::encrypt(const uint8_t *plaintext, size_t plaintextLen,
                      const std::vector<uint8_t> &key,
-                     std::vector<uint8_t> &out)
+                     std::vector<uint8_t> &out,
+                     uint64_t seqnum,
+                     const uint8_t *targetName, size_t targetNameLen)
 {
     out.clear();
 
@@ -51,13 +86,14 @@ void Crypto::encrypt(const uint8_t *plaintext, size_t plaintextLen,
 
     const size_t sizeFieldSize = sizeof(uint32_t);
     const size_t ciphertextSize = plaintextLen;
-    const size_t totalSize = sizeFieldSize + GCM_IV_SIZE + ciphertextSize + GCM_TAG_SIZE;
+    const size_t totalSize = sizeFieldSize + SEQNUM_SIZE + GCM_IV_SIZE + ciphertextSize + GCM_TAG_SIZE;
 
     out.resize(totalSize);
 
     byteorder::writeLE32(out.data(), static_cast<uint32_t>(ciphertextSize));
+    byteorder::writeLE64(out.data() + sizeFieldSize, seqnum);
 
-    uint8_t *ivPtr = out.data() + sizeFieldSize;
+    uint8_t *ivPtr = out.data() + sizeFieldSize + SEQNUM_SIZE;
     if (RAND_bytes(ivPtr, GCM_IV_SIZE) != 1)
     {
         throw std::runtime_error("Failed to generate random IV");
@@ -70,7 +106,15 @@ void Crypto::encrypt(const uint8_t *plaintext, size_t plaintextLen,
         throw std::runtime_error("Failed to initialize encryption");
     }
 
-    const size_t ciphertextOffset = sizeFieldSize + GCM_IV_SIZE;
+    const auto aad = buildAad(seqnum, targetName, targetNameLen);
+    int aadOut = 0;
+    if (EVP_EncryptUpdate(m_encryptCtx, nullptr, &aadOut, aad.data(),
+                          static_cast<int>(aad.size())) != 1)
+    {
+        throw std::runtime_error("Failed to feed AAD into encryption");
+    }
+
+    const size_t ciphertextOffset = sizeFieldSize + SEQNUM_SIZE + GCM_IV_SIZE;
 
     int encryptedLen = 0;
     if (EVP_EncryptUpdate(m_encryptCtx, out.data() + ciphertextOffset, &encryptedLen,
@@ -97,6 +141,13 @@ void Crypto::encrypt(const uint8_t *plaintext, size_t plaintextLen,
     }
 }
 
+void Crypto::encrypt(const uint8_t *plaintext, size_t plaintextLen,
+                     const std::vector<uint8_t> &key,
+                     std::vector<uint8_t> &out)
+{
+    encrypt(plaintext, plaintextLen, key, out, /*seqnum=*/0, nullptr, 0);
+}
+
 std::vector<uint8_t> Crypto::encrypt(std::vector<uint8_t> &&plaintext,
                                      const std::vector<uint8_t> &key)
 {
@@ -106,7 +157,8 @@ std::vector<uint8_t> Crypto::encrypt(std::vector<uint8_t> &&plaintext,
 }
 
 std::vector<uint8_t> Crypto::decrypt(const std::vector<uint8_t> &encryptedData,
-                                     const std::vector<uint8_t> &key)
+                                     const std::vector<uint8_t> &key,
+                                     const uint8_t *targetName, size_t targetNameLen)
 {
     if (encryptedData.empty())
     {
@@ -118,13 +170,17 @@ std::vector<uint8_t> Crypto::decrypt(const std::vector<uint8_t> &encryptedData,
         throw std::runtime_error("Invalid key size. Expected 32 bytes for AES-256");
     }
 
-    if (encryptedData.size() < sizeof(uint32_t) + GCM_IV_SIZE)
+    const size_t headerSize = sizeof(uint32_t) + SEQNUM_SIZE + GCM_IV_SIZE;
+    if (encryptedData.size() < headerSize)
     {
-        throw std::runtime_error("Encrypted data too small - missing size field or IV");
+        throw std::runtime_error("Encrypted data too small - missing header");
     }
 
     uint32_t dataSize = byteorder::readLE32(encryptedData.data());
     size_t position = sizeof(uint32_t);
+
+    uint64_t seqnum = byteorder::readLE64(encryptedData.data() + position);
+    position += SEQNUM_SIZE;
 
     const uint8_t *ivPtr = encryptedData.data() + position;
     position += GCM_IV_SIZE;
@@ -158,6 +214,14 @@ std::vector<uint8_t> Crypto::decrypt(const std::vector<uint8_t> &encryptedData,
         throw std::runtime_error("Failed to set authentication tag");
     }
 
+    const auto aad = buildAad(seqnum, targetName, targetNameLen);
+    int aadOut = 0;
+    if (EVP_DecryptUpdate(m_decryptCtx, nullptr, &aadOut, aad.data(),
+                          static_cast<int>(aad.size())) != 1)
+    {
+        throw std::runtime_error("Failed to feed AAD into decryption");
+    }
+
     std::vector<uint8_t> decryptedData(dataSize);
     int decryptedLen = 0;
 
@@ -177,4 +241,10 @@ std::vector<uint8_t> Crypto::decrypt(const std::vector<uint8_t> &encryptedData,
 
     decryptedData.resize(decryptedLen + finalLen);
     return decryptedData;
+}
+
+std::vector<uint8_t> Crypto::decrypt(const std::vector<uint8_t> &encryptedData,
+                                     const std::vector<uint8_t> &key)
+{
+    return decrypt(encryptedData, key, nullptr, 0);
 }

@@ -15,6 +15,7 @@ set(TEST_SOURCES
     tests/integration/test_WriterQueue.cpp
     tests/integration/test_RoundTrip.cpp
     tests/integration/test_Export.cpp
+    tests/integration/test_TamperSeqnum.cpp
 )
 
 macro(add_test_suite TEST_NAME TEST_SOURCE)
@@ -45,3 +46,4 @@ add_test_suite(test_compression_crypto tests/integration/test_CompressionCrypto.
 add_test_suite(test_writer_queue tests/integration/test_WriterQueue.cpp)
 add_test_suite(test_round_trip tests/integration/test_RoundTrip.cpp)
 add_test_suite(test_export tests/integration/test_Export.cpp)
+add_test_suite(test_tamper_seqnum tests/integration/test_TamperSeqnum.cpp)
