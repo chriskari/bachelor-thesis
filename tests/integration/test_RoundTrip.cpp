@@ -13,10 +13,8 @@
 #include <thread>
 #include <vector>
 
-// End-to-end round-trip: producers → LoggingManager → disk → decrypt → decompress →
-// deserialize. Reads segment files manually because LoggingManager::exportLogs is a stub
-// on this branch. Uses the same hardcoded placeholder key/IV that Writer currently uses
-// (see [src/Writer.cpp]); real key management is out of scope for this hardening pass.
+// Reads segments back manually (exportLogs is a stub) using the same placeholder
+// key/IV that Writer uses — real key management is out of scope here.
 
 namespace
 {
@@ -35,8 +33,7 @@ std::vector<uint8_t> readFile(const std::string &path)
     return buf;
 }
 
-// Split a segment file into the concatenated encrypted blobs Writer produced.
-// Format per blob: [u32 ciphertextSize][ciphertext][GCM_TAG_SIZE bytes tag].
+// Blob wire format: [u32 ciphertextSize][ciphertext][GCM_TAG_SIZE bytes tag].
 std::vector<std::vector<uint8_t>> splitSegmentIntoBlobs(const std::vector<uint8_t> &segment)
 {
     std::vector<std::vector<uint8_t>> blobs;
@@ -46,7 +43,7 @@ std::vector<std::vector<uint8_t>> splitSegmentIntoBlobs(const std::vector<uint8_
         uint32_t ciphertextSize = byteorder::readLE32(segment.data() + pos);
         size_t blobSize = sizeof(uint32_t) + ciphertextSize + Crypto::GCM_TAG_SIZE;
         if (pos + blobSize > segment.size())
-            break; // truncated trailer — shouldn't happen after clean stop()
+            break;
         blobs.emplace_back(segment.begin() + pos, segment.begin() + pos + blobSize);
         pos += blobSize;
     }
@@ -154,9 +151,8 @@ TEST_F(RoundTripTest, ProducesRecoverableEntries)
         ASSERT_TRUE(mgr.stop());
     }
 
-    // Read back all segments and count entries.
     auto files = listSegments(testDir, "rt");
-    ASSERT_FALSE(files.empty()) << "Expected at least one segment";
+    ASSERT_FALSE(files.empty());
 
     std::vector<LogEntry> recovered;
     for (const auto &f : files)
@@ -167,11 +163,9 @@ TEST_F(RoundTripTest, ProducesRecoverableEntries)
             recovered.emplace_back(std::move(e));
     }
 
-    EXPECT_EQ(static_cast<int>(recovered.size()), totalExpected)
-        << "Round-trip lost or duplicated entries";
+    EXPECT_EQ(static_cast<int>(recovered.size()), totalExpected);
 
-    // Spot-check a few fields. We can't rely on order (multiple writers, multiple files),
-    // so we verify every recovered entry has a well-formed location/controller pair.
+    // Order isn't deterministic across writers and files, so check field shape instead.
     for (const auto &e : recovered)
     {
         EXPECT_EQ(e.getActionType(), LogEntry::ActionType::READ);
@@ -180,8 +174,7 @@ TEST_F(RoundTripTest, ProducesRecoverableEntries)
     }
 }
 
-// Regression: a single flipped byte in a persisted segment must cause decrypt to throw
-// TamperDetectedException, not silently return empty plaintext.
+// A single flipped byte in a persisted segment must throw TamperDetectedException.
 TEST_F(RoundTripTest, TamperingInSegmentIsDetected)
 {
     {
@@ -201,8 +194,7 @@ TEST_F(RoundTripTest, TamperingInSegmentIsDetected)
     auto files = listSegments(testDir, "rt");
     ASSERT_FALSE(files.empty());
 
-    // Corrupt a byte in the first blob's ciphertext region (offset ~10: past the 4-byte
-    // size field, inside the encrypted payload).
+    // Corrupt a byte inside the ciphertext region (past the 4-byte size field).
     auto segment = readFile(files[0]);
     ASSERT_GT(segment.size(), 32u);
     segment[10] ^= 0xFF;

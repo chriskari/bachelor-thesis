@@ -107,9 +107,8 @@ TEST_F(WriterTest, EmptyQueue)
     writer->stop();
 }
 
-// Regression: a batch whose target filename resolves to a non-existent subdirectory
-// causes storage.writeToFile to throw (open fails). The writer must catch the exception,
-// drop the offending group's entries, and keep processing subsequent valid groups.
+// One failing batch must not take down the writer thread — subsequent batches still
+// get written, and the dropped entries are counted.
 TEST_F(WriterTest, WriterSurvivesBatchFailure)
 {
     writer = std::make_unique<Writer>(*queue, storage, /*batchSize*/ 10, /*useEncryption*/ false, /*compressionLevel*/ 0);
@@ -117,8 +116,7 @@ TEST_F(WriterTest, WriterSurvivesBatchFailure)
 
     BufferQueue::ProducerToken token = queue->createProducerToken();
 
-    // Group 1: unwritable target (slash points to a non-existent subdirectory). Writer
-    // will throw during open and drop these entries.
+    // Unwritable target: the slash points to a non-existent subdirectory, so open fails.
     std::vector<QueueItem> badBatch;
     const size_t badCount = 3;
     for (size_t i = 0; i < badCount; ++i)
@@ -129,16 +127,14 @@ TEST_F(WriterTest, WriterSurvivesBatchFailure)
     }
     queue->enqueueBatchBlocking(std::move(badBatch), token, std::chrono::milliseconds(100));
 
-    // Wait for the writer to observe and drop the bad batch.
     for (int i = 0; i < 50 && writer->droppedEntries() < badCount; ++i)
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
-    EXPECT_GE(writer->droppedEntries(), badCount) << "Writer should have counted dropped entries";
-    EXPECT_TRUE(writer->isRunning()) << "Writer must stay alive after a failing batch";
+    EXPECT_GE(writer->droppedEntries(), badCount);
+    EXPECT_TRUE(writer->isRunning());
 
-    // Group 2: valid target using default filename. Must still be processed.
     std::vector<QueueItem> goodBatch;
     const size_t goodCount = 3;
     for (size_t i = 0; i < goodCount; ++i)
@@ -148,13 +144,12 @@ TEST_F(WriterTest, WriterSurvivesBatchFailure)
     }
     queue->enqueueBatchBlocking(std::move(goodBatch), token, std::chrono::milliseconds(100));
 
-    // Wait for queue to drain.
     for (int i = 0; i < 50 && queue->size() > 0; ++i)
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     EXPECT_EQ(queue->size(), 0);
-    EXPECT_EQ(writer->droppedEntries(), badCount) << "Good batch should not have been dropped";
+    EXPECT_EQ(writer->droppedEntries(), badCount);
 
     writer->stop();
 }

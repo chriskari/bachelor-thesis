@@ -126,23 +126,19 @@ TEST_F(CompressionTest, LargeBatch)
     }
 }
 
-// Regression: decompress must reject inputs that expand past maxDecompressedSize
-// instead of allocating unbounded memory (zip-bomb defense).
+// Zip-bomb defense: a high-ratio input must throw when it would exceed the cap.
 TEST_F(CompressionTest, DecompressCapEnforced)
 {
-    // 5 MB of zeros compresses to a few KB — a classic high-ratio input.
     const size_t inputSize = 5 * 1024 * 1024;
     std::vector<uint8_t> zeros(inputSize, 0);
     std::vector<uint8_t> zerosCopy = zeros;
     std::vector<uint8_t> compressed = Compression::compress(std::move(zeros));
-    ASSERT_LT(compressed.size(), inputSize / 10) << "Zeros should compress dramatically";
+    ASSERT_LT(compressed.size(), inputSize / 10);
 
-    // With a 1 MB cap, decompressing 5 MB of output must throw.
     EXPECT_THROW(
         Compression::decompress(std::vector<uint8_t>(compressed), /*maxDecompressedSize*/ 1 * 1024 * 1024),
         std::runtime_error);
 
-    // With a generous cap, the same input decompresses normally.
     std::vector<uint8_t> round_tripped = Compression::decompress(
         std::move(compressed), /*maxDecompressedSize*/ 10 * 1024 * 1024);
     EXPECT_EQ(round_tripped.size(), inputSize);

@@ -9,8 +9,8 @@
 class Compression
 {
 public:
-    // Cap on decompressed output to defeat zip-bomb inputs. 100 MiB is 5× the largest
-    // segment payload we expect in practice and matches maxSegmentSize default.
+    // Zip-bomb guard: decompress throws if output would exceed this. Matches the default
+    // maxSegmentSize so legitimate inputs fit comfortably.
     static constexpr size_t DEFAULT_MAX_DECOMPRESSED_SIZE = 100 * 1024 * 1024;
 
     static std::vector<uint8_t> compress(std::vector<uint8_t> &&data, int level = Z_DEFAULT_COMPRESSION);

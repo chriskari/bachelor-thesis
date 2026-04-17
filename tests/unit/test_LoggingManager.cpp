@@ -55,6 +55,22 @@ TEST_F(LoggingManagerTest, StartStopIdempotent)
     EXPECT_FALSE(mgr.stop()) << "Second stop() must return false";
 }
 
+// Zero values for essential config fields must fail loudly at construction.
+TEST_F(LoggingManagerTest, InvalidConfigRejected)
+{
+    auto bad = [&](auto mutate) {
+        LoggingConfig cfg = makeConfig();
+        mutate(cfg);
+        EXPECT_THROW(LoggingManager{cfg}, std::invalid_argument);
+    };
+    bad([](LoggingConfig &c) { c.queueCapacity = 0; });
+    bad([](LoggingConfig &c) { c.numWriterThreads = 0; });
+    bad([](LoggingConfig &c) { c.batchSize = 0; });
+    bad([](LoggingConfig &c) { c.maxSegmentSize = 0; });
+    bad([](LoggingConfig &c) { c.maxOpenFiles = 0; });
+    bad([](LoggingConfig &c) { c.maxAttempts = 0; });
+}
+
 TEST_F(LoggingManagerTest, AppendAfterStopRejected)
 {
     LoggingManager mgr(makeConfig());
@@ -63,14 +79,11 @@ TEST_F(LoggingManagerTest, AppendAfterStopRejected)
     EXPECT_TRUE(mgr.append(makeEntry(), token));
 
     ASSERT_TRUE(mgr.stop());
-    // After stop the accepting-check must reject.
     EXPECT_FALSE(mgr.append(makeEntry(), token));
 }
 
-// Regression: producers that are in flight when stop() is called must either fully
-// complete their enqueue OR be rejected — they must never land after the queue has
-// been drained. Pre-fix, a producer that passed the accepting-check could race the
-// flush and have its entry silently dropped.
+// Producers that passed the accepting-check must either land in the queue or be
+// rejected — never race stop()'s flush and silently drop.
 TEST_F(LoggingManagerTest, ShutdownDrainHasNoInflightLoss)
 {
     for (int cycle = 0; cycle < 3; ++cycle)
@@ -81,8 +94,7 @@ TEST_F(LoggingManagerTest, ShutdownDrainHasNoInflightLoss)
         std::atomic<bool> stopProducers{false};
         std::atomic<size_t> acceptedByMgr{0};
 
-        // Producer: append until told to stop. Producer stops once it starts seeing
-        // rejections post-shutdown, which keeps the test fast and quiet.
+        // Exit once rejections are consistent so the test stays fast and quiet.
         auto producerFn = [&]()
         {
             auto token = mgr.createProducerToken();
@@ -105,7 +117,6 @@ TEST_F(LoggingManagerTest, ShutdownDrainHasNoInflightLoss)
         for (int i = 0; i < 3; ++i)
             producers.emplace_back(producerFn);
 
-        // Let producers run briefly, then shut down while they race against stop().
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
         ASSERT_TRUE(mgr.stop());
 
@@ -113,9 +124,6 @@ TEST_F(LoggingManagerTest, ShutdownDrainHasNoInflightLoss)
         for (auto &t : producers)
             t.join();
 
-        // The invariant: stop() must not return while a producer that observed
-        // accepting=true is still mid-enqueue. Clean shutdown across cycles with no
-        // hang and at least some accepted entries is what proves this.
         EXPECT_GT(acceptedByMgr.load(), 0u) << "Cycle " << cycle << ": should accept some";
     }
 }

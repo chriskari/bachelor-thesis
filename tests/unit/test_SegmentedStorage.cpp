@@ -208,10 +208,7 @@ TEST_F(SegmentedStorageTest, ConcurrentWriteWithRotationTest)
 
     std::vector<std::thread> threads;
     std::vector<std::vector<uint8_t>> dataBlocks;
-    // Reserve capacity so later push_backs don't reallocate the outer vector. Without
-    // this, a writer thread holding an rvalue reference to dataBlocks[i] could have that
-    // reference dangle after the main thread's push_back moves the elements to a new
-    // backing buffer, causing pwrite to read from freed memory (EFAULT).
+    // Reserve so push_back doesn't reallocate while worker threads hold refs to elements.
     dataBlocks.reserve(numThreads);
 
     for (size_t i = 0; i < numThreads; i++)
@@ -637,10 +634,8 @@ TEST_F(SegmentedStorageTest, MultiSegmentBoundaryTest)
     }
 }
 
-// Regression: LRU eviction must not close an fd while a concurrent writer is holding
-// shared_lock on the entry's fileMutex. maxOpenFiles=2 forces constant eviction while
-// six filenames cycle through as writers hammer pwrite. Prior to the fix this would
-// race and either corrupt data or throw "pwrite failed" (EBADF) intermittently.
+// maxOpenFiles=2 forces constant eviction while six filenames cycle — pre-fix this
+// could close an fd mid-pwrite (EBADF) or lose data.
 TEST_F(SegmentedStorageTest, LRUEvictionUnderConcurrentWrites)
 {
     const size_t maxOpenFiles = 2;
@@ -681,6 +676,57 @@ TEST_F(SegmentedStorageTest, LRUEvictionUnderConcurrentWrites)
         EXPECT_EQ(total, writesPerFilename * dataSize)
             << "evict_file_" << i << ": data lost under LRU pressure";
     }
+}
+
+// A rotation whose openWithRetry fails must not leave the cache holding a broken entry
+// — pre-fix, writeToFile would spin forever refetching an fd=-1 entry.
+TEST_F(SegmentedStorageTest, RotationOpenFailureRecovers)
+{
+    if (::geteuid() == 0)
+    {
+        GTEST_SKIP() << "Cannot simulate open failure while running as root";
+    }
+
+    const size_t maxSegmentSize = 100;
+    SegmentedStorage storage(testPath, baseFilename, maxSegmentSize,
+                             /*maxAttempts*/ 2,
+                             /*baseRetryDelay*/ std::chrono::milliseconds(1));
+
+    // Restore perms on scope exit so TearDown can delete the directory even on failure.
+    struct PermRestorer
+    {
+        std::string path;
+        ~PermRestorer()
+        {
+            std::error_code ec;
+            std::filesystem::permissions(
+                path,
+                std::filesystem::perms::owner_all |
+                    std::filesystem::perms::group_read |
+                    std::filesystem::perms::others_read,
+                std::filesystem::perm_options::replace, ec);
+        }
+    } restorer{testPath};
+
+    ASSERT_EQ(storage.write(std::vector<uint8_t>(80, 'A')), 80u);
+
+    // Remove write permission on the base dir so the next rotation's open fails.
+    std::filesystem::permissions(
+        testPath,
+        std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec,
+        std::filesystem::perm_options::replace);
+
+    EXPECT_THROW(storage.write(std::vector<uint8_t>(80, 'B')), std::runtime_error);
+
+    // After restoring perms, the storage should recover via cache invalidation.
+    std::filesystem::permissions(
+        testPath,
+        std::filesystem::perms::owner_all |
+            std::filesystem::perms::group_read |
+            std::filesystem::perms::others_read,
+        std::filesystem::perm_options::replace);
+
+    EXPECT_NO_THROW(storage.write(std::vector<uint8_t>(80, 'C')));
 }
 
 int main(int argc, char **argv)

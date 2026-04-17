@@ -8,10 +8,8 @@
 #include <stdexcept>
 #include <openssl/evp.h>
 
-// Thrown by Crypto::decrypt when the AES-GCM authentication tag does not verify —
-// i.e. the ciphertext was tampered with, truncated, or produced under a different key/IV.
-// A dedicated type lets callers distinguish tamper detection from generic errors like
-// malformed framing or wrong key size, which continue to throw std::runtime_error.
+// Distinct type so callers can tell GCM tag failure apart from framing/key errors,
+// which continue to throw std::runtime_error.
 class TamperDetectedException : public std::runtime_error
 {
 public:
@@ -36,8 +34,7 @@ public:
                                  const std::vector<uint8_t> &key,
                                  const std::vector<uint8_t> &iv);
 
-    // Throws TamperDetectedException if the GCM tag fails verification.
-    // Throws std::runtime_error on framing errors, wrong key/IV size, or OpenSSL errors.
+    // Throws TamperDetectedException on GCM tag failure; std::runtime_error otherwise.
     std::vector<uint8_t> decrypt(const std::vector<uint8_t> &encryptedData,
                                  const std::vector<uint8_t> &key,
                                  const std::vector<uint8_t> &iv);

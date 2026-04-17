@@ -102,7 +102,7 @@ void Writer::processLogEntries()
             }
             catch (const std::exception &e)
             {
-                // Drop this group, keep the writer alive so subsequent batches continue.
+                // Drop the failing group; keep the thread alive for subsequent batches.
                 m_droppedEntries.fetch_add(groupSize, std::memory_order_acq_rel);
                 std::cerr << "Writer: dropped " << groupSize << " entries from "
                           << (targetFilename ? *targetFilename : std::string("<default>"))

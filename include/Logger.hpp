@@ -46,10 +46,11 @@ private:
     static std::unique_ptr<Logger> s_instance;
     static std::mutex s_instanceMutex;
 
+    // Readers snapshot m_logQueue under this lock and then use the snapshot unlocked,
+    // so reset() can null the member without racing an in-flight enqueue.
+    mutable std::mutex m_stateMutex;
     std::shared_ptr<BufferQueue> m_logQueue;
     std::chrono::milliseconds m_appendTimeout;
-
-    // State tracking
     bool m_initialized;
 
     // Helper to report errors

@@ -45,9 +45,8 @@ private:
         int fd{-1};
         std::atomic<size_t> segmentIndex{0};
         std::atomic<size_t> currentOffset{0};
-        // Incremented by rotateSegment. Writers snapshot this before reserving an offset
-        // and re-check it under shared_lock before pwriting; a mismatch means the segment
-        // the offset was reserved against has been rotated away, and the writer must retry.
+        // Bumped by rotateSegment; writers use it to detect that their reserved offset
+        // belongs to a closed segment and must be discarded.
         std::atomic<size_t> generation{0};
         std::string currentSegmentPath;
         mutable std::shared_mutex fileMutex; // shared for writes, exclusive for rotate/flush
@@ -63,6 +62,10 @@ private:
         void flush(const std::string &filename);
         void flushAll();
         void closeAll();
+        // Drops the cache's reference without touching the fd; used when a caller has
+        // already closed the fd (e.g. a partial rotation) and needs the next get() to
+        // reconstruct state instead of handing back the broken entry.
+        void invalidate(const std::string &filename);
 
     private:
         size_t m_capacity;

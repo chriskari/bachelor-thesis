@@ -46,15 +46,8 @@ LogEntry::LogEntry(ActionType actionType,
 {
 }
 
-// Wire format (little-endian, byte-order independent):
-//   actionType:  u32
-//   dataLocation, dataControllerId, dataProcessorId, dataSubjectId: each u32 length + bytes
-//   timestamp:   u64 (ms since epoch)
-//   payloadSize: u32
-//   payload:     payloadSize bytes
-// On x86_64 this produces the same bytes as the previous memcpy-based format; differences
-// only show up on big-endian hosts, which previously couldn't read files written on
-// little-endian hosts.
+// Wire format (all integers little-endian):
+//   u32 actionType | 4× (u32 length + bytes) | u64 timestamp_ms | u32 payloadSize | payload
 
 std::vector<uint8_t> LogEntry::serialize() &&
 {

@@ -24,9 +24,8 @@ public:
     void stop();
     bool isRunning() const;
 
-    // Count of log entries dropped by this writer because their batch failed during
-    // serialization, compression, encryption, or write. Bumped when processLogEntries
-    // catches an exception and discards the offending batch to keep the thread alive.
+    // Entries discarded because their pipeline stage (serialize/compress/encrypt/write)
+    // threw; exposed so tests and monitoring can observe silent drops.
     size_t droppedEntries() const { return m_droppedEntries.load(std::memory_order_acquire); }
 
 private:

@@ -2,7 +2,6 @@
 #include "QueueItem.hpp"
 #include <iostream>
 
-// Initialize static members
 std::unique_ptr<Logger> Logger::s_instance = nullptr;
 std::mutex Logger::s_instanceMutex;
 
@@ -34,6 +33,7 @@ Logger::~Logger()
 bool Logger::initialize(std::shared_ptr<BufferQueue> queue,
                         std::chrono::milliseconds appendTimeout)
 {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
     if (m_initialized)
     {
         reportError("Logger already initialized");
@@ -55,37 +55,55 @@ bool Logger::initialize(std::shared_ptr<BufferQueue> queue,
 
 BufferQueue::ProducerToken Logger::createProducerToken()
 {
-    if (!m_initialized)
+    std::shared_ptr<BufferQueue> queue;
     {
-        reportError("Logger not initialized");
-        throw std::runtime_error("Logger not initialized");
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        if (!m_initialized)
+        {
+            reportError("Logger not initialized");
+            throw std::runtime_error("Logger not initialized");
+        }
+        queue = m_logQueue;
     }
-
-    return m_logQueue->createProducerToken();
+    return queue->createProducerToken();
 }
 
 bool Logger::append(LogEntry entry,
                     BufferQueue::ProducerToken &token,
                     const std::optional<std::string> &filename)
 {
-    if (!m_initialized)
+    std::shared_ptr<BufferQueue> queue;
+    std::chrono::milliseconds timeout;
     {
-        reportError("Logger not initialized");
-        return false;
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        if (!m_initialized)
+        {
+            reportError("Logger not initialized");
+            return false;
+        }
+        queue = m_logQueue;
+        timeout = m_appendTimeout;
     }
 
     QueueItem item{std::move(entry), filename};
-    return m_logQueue->enqueueBlocking(std::move(item), token, m_appendTimeout);
+    return queue->enqueueBlocking(std::move(item), token, timeout);
 }
 
 bool Logger::appendBatch(std::vector<LogEntry> entries,
                          BufferQueue::ProducerToken &token,
                          const std::optional<std::string> &filename)
 {
-    if (!m_initialized)
+    std::shared_ptr<BufferQueue> queue;
+    std::chrono::milliseconds timeout;
     {
-        reportError("Logger not initialized");
-        return false;
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        if (!m_initialized)
+        {
+            reportError("Logger not initialized");
+            return false;
+        }
+        queue = m_logQueue;
+        timeout = m_appendTimeout;
     }
 
     if (entries.empty())
@@ -99,17 +117,17 @@ bool Logger::appendBatch(std::vector<LogEntry> entries,
     {
         batch.emplace_back(std::move(entry), filename);
     }
-    return m_logQueue->enqueueBatchBlocking(std::move(batch), token, m_appendTimeout);
+    return queue->enqueueBatchBlocking(std::move(batch), token, timeout);
 }
 
 bool Logger::reset()
 {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
     if (!m_initialized)
     {
         return false;
     }
 
-    // Reset state
     m_initialized = false;
     m_logQueue.reset();
 
@@ -121,14 +139,15 @@ bool Logger::exportLogs(
     std::chrono::system_clock::time_point fromTimestamp,
     std::chrono::system_clock::time_point toTimestamp)
 {
-    if (!m_initialized)
     {
-        reportError("Logger not initialized");
-        return false;
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        if (!m_initialized)
+        {
+            reportError("Logger not initialized");
+            return false;
+        }
     }
 
-    // This functionality would typically be handled by a separate component,
-    // such as a log storage or retrieval system
     reportError("Export logs functionality not implemented in Logger");
     return false;
 }

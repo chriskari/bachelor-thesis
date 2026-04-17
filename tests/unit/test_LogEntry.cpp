@@ -197,11 +197,10 @@ TEST(LogEntryTest5, BatchSerializationDeserialization_WorksCorrectly)
     }
 }
 
-// Regression: a malformed batch with a huge entrySize must be rejected cleanly
-// (deserializeBatch returns an empty vector) instead of attempting a 4 GB allocation.
+// A malformed entrySize must be rejected before the 4 GB allocation attempt.
 TEST(LogEntryRegression, DeserializeBatchRejectsOversizedEntry)
 {
-    // numEntries=1, entrySize=UINT32_MAX — exceeds MAX_ENTRY_SIZE.
+    // numEntries=1, entrySize=UINT32_MAX — well past MAX_ENTRY_SIZE.
     std::vector<uint8_t> malformed(sizeof(uint32_t) + sizeof(uint32_t), 0);
     uint32_t numEntries = 1;
     uint32_t entrySize = std::numeric_limits<uint32_t>::max();
@@ -212,13 +211,10 @@ TEST(LogEntryRegression, DeserializeBatchRejectsOversizedEntry)
     EXPECT_TRUE(recovered.empty()) << "Oversized entry must not produce a LogEntry";
 }
 
-// Regression: a single LogEntry with a huge declared payloadSize must cause
-// deserialize to return false, not allocate gigabytes.
+// A malformed payloadSize must return false instead of allocating gigabytes.
 TEST(LogEntryRegression, DeserializeRejectsOversizedPayload)
 {
-    // Build a buffer with:
-    //   actionType (int), 4× empty strings (each uint32 length = 0),
-    //   timestamp (int64), payloadSize = MAX_PAYLOAD_SIZE + 1
+    // Well-formed header (empty strings, zero timestamp) plus oversized payloadSize.
     std::vector<uint8_t> buf;
     int actionType = static_cast<int>(LogEntry::ActionType::CREATE);
     buf.insert(buf.end(),

@@ -162,9 +162,6 @@ std::vector<uint8_t> Crypto::decrypt(const std::vector<uint8_t> &encryptedData,
 
     if (ret != 1)
     {
-        // Tag verification failed — ciphertext has been tampered with, truncated, or was
-        // produced under a different key/IV. Surface this distinctly so callers can
-        // distinguish tamper detection from other errors.
         throw TamperDetectedException("AES-GCM authentication tag verification failed");
     }
 

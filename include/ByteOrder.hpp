@@ -3,10 +3,7 @@
 
 #include <cstdint>
 
-// Little-endian byte helpers. Serialized log/crypto formats must be byte-order independent
-// of the host: on x86_64 these compile to the same bytes as raw memcpy, but on a big-endian
-// host the wire format stays portable. Using these everywhere also documents intent — when
-// you see readLE32 you know the adjacent bytes are a 32-bit little-endian integer.
+// Little-endian byte helpers so the on-disk wire format is host-independent.
 namespace byteorder
 {
 inline void writeLE32(uint8_t *dst, uint32_t v) noexcept

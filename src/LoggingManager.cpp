@@ -10,6 +10,20 @@ LoggingManager::LoggingManager(const LoggingConfig &config)
       m_useEncryption(config.useEncryption),
       m_compressionLevel(config.compressionLevel)
 {
+    // Fields with valid zero/false settings (useEncryption, compressionLevel) are omitted.
+    if (config.queueCapacity == 0)
+        throw std::invalid_argument("LoggingConfig: queueCapacity must be > 0");
+    if (config.numWriterThreads == 0)
+        throw std::invalid_argument("LoggingConfig: numWriterThreads must be > 0");
+    if (config.batchSize == 0)
+        throw std::invalid_argument("LoggingConfig: batchSize must be > 0");
+    if (config.maxSegmentSize == 0)
+        throw std::invalid_argument("LoggingConfig: maxSegmentSize must be > 0");
+    if (config.maxOpenFiles == 0)
+        throw std::invalid_argument("LoggingConfig: maxOpenFiles must be > 0");
+    if (config.maxAttempts == 0)
+        throw std::invalid_argument("LoggingConfig: maxAttempts must be > 0");
+
     if (!std::filesystem::create_directories(config.basePath) &&
         !std::filesystem::exists(config.basePath))
     {
@@ -71,11 +85,8 @@ bool LoggingManager::stop()
 
     m_acceptingEntries.store(false, std::memory_order_release);
 
-    // Wait for producers that already passed the accepting-check to finish enqueuing.
-    // Pairs with the increment-then-check pattern in append()/appendBatch(): any producer
-    // that still observes acceptingEntries=true will have incremented m_inflightAppends
-    // before the check, and producers arriving after this barrier will see the flag as
-    // false. Spin rather than condvar — shutdown is rare and the inflight window is tiny.
+    // Drain producers already past the accepting-check so no entry lands after flush().
+    // Pairs with the increment-then-check ordering in InflightGuard below.
     while (m_inflightAppends.load(std::memory_order_acquire) > 0)
     {
         std::this_thread::yield();
@@ -114,8 +125,7 @@ BufferQueue::ProducerToken LoggingManager::createProducerToken()
 
 namespace
 {
-// Increment-then-check RAII guard. Must be constructed BEFORE reading m_acceptingEntries
-// so stop()'s wait on m_inflightAppends is correctly synchronized with producers in flight.
+// Must be constructed BEFORE reading m_acceptingEntries so stop() can safely drain.
 struct InflightGuard
 {
     std::atomic<size_t> &counter;
