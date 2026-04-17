@@ -10,7 +10,7 @@ LoggingManager::LoggingManager(const LoggingConfig &config)
       m_useEncryption(config.useEncryption),
       m_compressionLevel(config.compressionLevel)
 {
-    // Fields with valid zero/false settings (useEncryption, compressionLevel) are omitted.
+    // Zero/false are valid for useEncryption and compressionLevel, so they aren't checked.
     if (config.queueCapacity == 0)
         throw std::invalid_argument("LoggingConfig: queueCapacity must be > 0");
     if (config.numWriterThreads == 0)
@@ -104,7 +104,6 @@ bool LoggingManager::stop()
     }
     m_writers.clear();
 
-    // Flush storage to ensure all data is written
     if (m_storage)
     {
         m_storage->flush();
@@ -125,7 +124,7 @@ BufferQueue::ProducerToken LoggingManager::createProducerToken()
 
 namespace
 {
-// Must be constructed BEFORE reading m_acceptingEntries so stop() can safely drain.
+// Construct BEFORE reading m_acceptingEntries so stop() can safely drain.
 struct InflightGuard
 {
     std::atomic<size_t> &counter;
@@ -175,13 +174,6 @@ bool LoggingManager::exportLogs(
     std::chrono::system_clock::time_point fromTimestamp,
     std::chrono::system_clock::time_point toTimestamp)
 {
-    // This is a placeholder implementation for log export
-    // A complete solution would:
-    // 1. Read the encrypted segments from storage
-    // 2. Decrypt and decompress them
-    // 3. Filter by timestamp if requested
-    // 4. Write to the output path
-
     std::cerr << "LoggingSystem: Export logs not fully implemented" << std::endl;
     return false;
 }

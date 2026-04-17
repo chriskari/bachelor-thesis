@@ -37,16 +37,18 @@ public:
                     std::chrono::system_clock::time_point toTimestamp = std::chrono::system_clock::time_point());
 
 private:
-    std::shared_ptr<BufferQueue> m_queue;           // Thread-safe queue for queue items
-    std::shared_ptr<SegmentedStorage> m_storage;    // Manages append-only log segments
-    std::vector<std::unique_ptr<Writer>> m_writers; // Multiple writer threads
-    std::atomic<bool> m_running{false};             // System running state
-    std::atomic<bool> m_acceptingEntries{false};    // Controls whether new entries are accepted
-    std::atomic<size_t> m_inflightAppends{0};       // Producers currently past the accepting-check
-    std::mutex m_systemMutex;                       // For system-wide operations
+    std::shared_ptr<BufferQueue> m_queue;
+    std::shared_ptr<SegmentedStorage> m_storage;
+    std::vector<std::unique_ptr<Writer>> m_writers;
+    std::atomic<bool> m_running{false};
+    std::atomic<bool> m_acceptingEntries{false};
+    // Producers past the accepting-check that haven't finished enqueuing yet; stop()
+    // drains this to zero before flushing.
+    std::atomic<size_t> m_inflightAppends{0};
+    std::mutex m_systemMutex;
 
-    size_t m_numWriterThreads; // Number of writer threads
-    size_t m_batchSize;        // Batch size for writers
+    size_t m_numWriterThreads;
+    size_t m_batchSize;
     bool m_useEncryption;
     int m_compressionLevel;
 };

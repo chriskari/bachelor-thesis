@@ -14,7 +14,7 @@
 #include <chrono>
 #include <thread>
 #include <stdexcept>
-#include <list> // For LRU cache
+#include <list>
 
 class SegmentedStorage
 {
@@ -29,7 +29,10 @@ public:
     ~SegmentedStorage();
 
     size_t write(std::vector<uint8_t> &&data);
+    size_t write(const uint8_t *data, size_t size);
     size_t writeToFile(const std::string &filename, std::vector<uint8_t> &&data);
+    // Pointer/size overload so the caller keeps ownership of the buffer.
+    size_t writeToFile(const std::string &filename, const uint8_t *data, size_t size);
     void flush();
 
 private:
@@ -38,21 +41,20 @@ private:
     size_t m_maxSegmentSize;
     size_t m_maxAttempts;
     std::chrono::milliseconds m_baseRetryDelay;
-    size_t m_maxOpenFiles; // Max number of cache entries
+    size_t m_maxOpenFiles;
 
     struct CacheEntry
     {
         int fd{-1};
         std::atomic<size_t> segmentIndex{0};
         std::atomic<size_t> currentOffset{0};
-        // Bumped by rotateSegment; writers use it to detect that their reserved offset
-        // belongs to a closed segment and must be discarded.
+        // Bumped by rotateSegment; writers compare their pre-reservation value to detect
+        // that their reserved offset points at a closed segment and must be discarded.
         std::atomic<size_t> generation{0};
         std::string currentSegmentPath;
-        mutable std::shared_mutex fileMutex; // shared for writes, exclusive for rotate/flush
+        mutable std::shared_mutex fileMutex; // shared for pwrite, exclusive for rotate/flush
     };
 
-    // Unified LRU Cache for both file descriptors and segment information
     class LRUCache
     {
     public:
@@ -62,25 +64,22 @@ private:
         void flush(const std::string &filename);
         void flushAll();
         void closeAll();
-        // Drops the cache's reference without touching the fd; used when a caller has
-        // already closed the fd (e.g. a partial rotation) and needs the next get() to
-        // reconstruct state instead of handing back the broken entry.
+        // Drop the cache reference without touching the fd. Callers that have already
+        // closed the fd (partial rotation) use this so the next get() rebuilds state.
         void invalidate(const std::string &filename);
 
     private:
         size_t m_capacity;
         SegmentedStorage *m_parent;
 
-        // LRU list of filenames
         std::list<std::string> m_lruList;
-        // Map from filename to cache entry and iterator in LRU list
         struct CacheData
         {
             std::shared_ptr<CacheEntry> entry;
             std::list<std::string>::iterator lruIt;
         };
         std::unordered_map<std::string, CacheData> m_cache;
-        mutable std::mutex m_mutex; // Protects m_lruList and m_cache
+        mutable std::mutex m_mutex;
 
         void evictLRU();
         std::shared_ptr<CacheEntry> reconstructState(const std::string &filename);
@@ -93,7 +92,6 @@ private:
     size_t getFileSize(const std::string &path) const;
     size_t findLatestSegmentIndex(const std::string &filename) const;
 
-    // Retry helpers use member-configured parameters
     template <typename Func>
     auto retryWithBackoff(Func &&f)
     {

@@ -20,8 +20,7 @@ SegmentedStorage::SegmentedStorage(const std::string &basePath,
       m_cache(maxOpenFiles, this)
 {
     std::filesystem::create_directories(m_basePath);
-    // Pre-warm the cache with the base filename
-    m_cache.get(m_baseFilename);
+    m_cache.get(m_baseFilename); // pre-warm
 }
 
 SegmentedStorage::~SegmentedStorage()
@@ -29,41 +28,61 @@ SegmentedStorage::~SegmentedStorage()
     m_cache.closeAll();
 }
 
-// LRUCache methods
 std::shared_ptr<SegmentedStorage::CacheEntry> SegmentedStorage::LRUCache::get(const std::string &filename)
 {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_cache.find(filename);
+        if (it != m_cache.end())
+        {
+            m_lruList.erase(it->second.lruIt);
+            m_lruList.push_front(filename);
+            it->second.lruIt = m_lruList.begin();
+            return it->second.entry;
+        }
+    }
 
+    // Reconstruct without the cache mutex so concurrent hits for other filenames don't
+    // block on our open/stat. Two threads racing for the same filename is harmless:
+    // O_CREAT|O_RDWR|O_APPEND is idempotent, pwrite is thread-safe per fd, and the loser
+    // of the insert race below closes its orphan fd before dropping the entry.
+    auto newEntry = reconstructState(filename);
+
+    std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_cache.find(filename);
     if (it != m_cache.end())
     {
-        // Found in cache, move to front (most recently used)
+        if (newEntry->fd >= 0)
+        {
+            try
+            {
+                m_parent->fsyncRetry(newEntry->fd);
+            }
+            catch (...)
+            {
+            }
+            ::close(newEntry->fd);
+            newEntry->fd = -1;
+        }
         m_lruList.erase(it->second.lruIt);
         m_lruList.push_front(filename);
         it->second.lruIt = m_lruList.begin();
         return it->second.entry;
     }
 
-    // Not in cache, need to reconstruct state
-    auto entry = reconstructState(filename);
-
-    // Check if we need to evict
     if (m_cache.size() >= m_capacity)
     {
         evictLRU();
     }
 
-    // Add to cache
     m_lruList.push_front(filename);
-    m_cache[filename] = {entry, m_lruList.begin()};
-
-    return entry;
+    m_cache[filename] = {newEntry, m_lruList.begin()};
+    return newEntry;
 }
 
 void SegmentedStorage::LRUCache::evictLRU()
 {
-    // Lock ordering: m_mutex is held on entry and may wrap a fileMutex; the reverse is
-    // forbidden, so callers of LRUCache::get() must not hold any fileMutex.
+    // Lock ordering: m_mutex > fileMutex. Callers of get() must not hold any fileMutex.
     if (m_lruList.empty())
         return;
 
@@ -71,7 +90,7 @@ void SegmentedStorage::LRUCache::evictLRU()
     auto it = m_cache.find(lru_filename);
     if (it != m_cache.end())
     {
-        // Take the entry's exclusive lock so we don't close an fd a writer is mid-pwrite on.
+        // Exclusive lock so we don't close an fd while a writer is mid-pwrite.
         auto entry = it->second.entry;
         {
             std::unique_lock<std::shared_mutex> fileLock(entry->fileMutex);
@@ -85,7 +104,6 @@ void SegmentedStorage::LRUCache::evictLRU()
                 }
                 catch (...)
                 {
-                    // Swallow fsync failure so we still close and don't leak the fd.
                 }
                 ::close(fd);
             }
@@ -97,21 +115,15 @@ void SegmentedStorage::LRUCache::evictLRU()
 
 std::shared_ptr<SegmentedStorage::CacheEntry> SegmentedStorage::LRUCache::reconstructState(const std::string &filename)
 {
-    // Called with m_mutex already locked
     auto entry = std::make_shared<CacheEntry>();
 
-    // Find the latest segment index for this filename
     size_t latestIndex = m_parent->findLatestSegmentIndex(filename);
     entry->segmentIndex.store(latestIndex, std::memory_order_release);
 
-    // Generate the path for the current segment
     std::string segmentPath = m_parent->generateSegmentPath(filename, latestIndex);
     entry->currentSegmentPath = segmentPath;
-
-    // Open the file and get its current size
     entry->fd = m_parent->openWithRetry(segmentPath.c_str(), O_CREAT | O_RDWR | O_APPEND, 0644);
 
-    // Get the current file size to set as the offset
     size_t fileSize = m_parent->getFileSize(segmentPath);
     entry->currentOffset.store(fileSize, std::memory_order_release);
 
@@ -142,8 +154,7 @@ void SegmentedStorage::LRUCache::flushAll()
 
 void SegmentedStorage::LRUCache::invalidate(const std::string &filename)
 {
-    // Caller has already closed the fd; we only drop the cache reference so the next
-    // get() reconstructs state instead of returning the broken entry.
+    // Caller has already closed the fd; we just drop the cache reference.
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_cache.find(filename);
     if (it == m_cache.end())
@@ -169,7 +180,6 @@ void SegmentedStorage::LRUCache::closeAll()
             }
             catch (...)
             {
-                // Swallow fsync failure so we still close and don't leak the fd.
             }
             ::close(fd);
         }
@@ -192,7 +202,7 @@ size_t SegmentedStorage::findLatestSegmentIndex(const std::string &filename) con
                 std::string name = entry.path().filename().string();
                 if (name.find(pattern) == 0)
                 {
-                    // Extract the index from filename format: filename_YYYYMMDD_HHMMSS_NNNNNN.log
+                    // Segment filenames look like basename_YYYYMMDD_HHMMSS_NNNNNN.log
                     size_t lastUnderscore = name.find_last_of('_');
                     if (lastUnderscore != std::string::npos)
                     {
@@ -207,7 +217,6 @@ size_t SegmentedStorage::findLatestSegmentIndex(const std::string &filename) con
                             }
                             catch (...)
                             {
-                                // Ignore files that don't match the expected format
                             }
                         }
                     }
@@ -217,7 +226,6 @@ size_t SegmentedStorage::findLatestSegmentIndex(const std::string &filename) con
     }
     catch (const std::filesystem::filesystem_error &)
     {
-        // If directory doesn't exist or other filesystem error, return 0
     }
 
     return maxIndex;
@@ -235,21 +243,29 @@ size_t SegmentedStorage::getFileSize(const std::string &path) const
 
 size_t SegmentedStorage::write(std::vector<uint8_t> &&data)
 {
-    return writeToFile(m_baseFilename, std::move(data));
+    return writeToFile(m_baseFilename, data.data(), data.size());
+}
+
+size_t SegmentedStorage::write(const uint8_t *data, size_t size)
+{
+    return writeToFile(m_baseFilename, data, size);
 }
 
 size_t SegmentedStorage::writeToFile(const std::string &filename, std::vector<uint8_t> &&data)
 {
-    size_t size = data.size();
+    return writeToFile(filename, data.data(), data.size());
+}
+
+size_t SegmentedStorage::writeToFile(const std::string &filename, const uint8_t *data, size_t size)
+{
     if (size == 0)
         return 0;
 
     std::shared_ptr<CacheEntry> entry = m_cache.get(filename);
     size_t writeOffset;
 
-    // Reserve and write under shared_lock so a concurrent rotation (which holds
-    // unique_lock) cannot slip between fetch_add and pwrite and strand the reservation
-    // on a closed segment — that would leave sparse gaps in the blob stream.
+    // Reserve and pwrite under a shared_lock so a concurrent rotation (exclusive lock)
+    // can't slip between fetch_add and pwrite and strand the reservation on a closed fd.
     while (true)
     {
         size_t genBefore = entry->generation.load(std::memory_order_acquire);
@@ -267,10 +283,9 @@ size_t SegmentedStorage::writeToFile(const std::string &filename, std::vector<ui
                 }
                 catch (...)
                 {
-                    // rotateSegment closed the old fd but failed to open the new one.
-                    // Without invalidating, get() would keep handing back the broken
-                    // entry and writeToFile would spin. Release rotLock first to honor
-                    // the m_mutex > fileMutex ordering.
+                    // Old fd is closed but the new one failed to open. Drop the cache
+                    // entry so the next get() rebuilds state; release rotLock first to
+                    // honor the m_mutex > fileMutex order.
                     rotLock.unlock();
                     m_cache.invalidate(filename);
                     throw;
@@ -282,8 +297,7 @@ size_t SegmentedStorage::writeToFile(const std::string &filename, std::vector<ui
         std::shared_lock<std::shared_mutex> writeLock(entry->fileMutex);
         if (entry->fd < 0)
         {
-            // Entry was evicted; release the lock before calling get() so it can take
-            // the cache's internal mutex without deadlocking against us.
+            // Evicted. Release before calling get() to preserve m_mutex > fileMutex order.
             writeLock.unlock();
             entry = m_cache.get(filename);
             continue;
@@ -297,11 +311,11 @@ size_t SegmentedStorage::writeToFile(const std::string &filename, std::vector<ui
         if (writeOffset + size > m_maxSegmentSize)
         {
             // Another writer crossed the boundary first. Our bumped offset is harmless
-            // because we never pwrite at it; the next iteration will route to rotation.
+            // since we never pwrite at it; retry routes through rotation.
             continue;
         }
 
-        pwriteFull(entry->fd, data.data(), size, static_cast<off_t>(writeOffset));
+        pwriteFull(entry->fd, data, size, static_cast<off_t>(writeOffset));
         break;
     }
 
@@ -329,8 +343,8 @@ std::string SegmentedStorage::rotateSegment(const std::string &filename, std::sh
     entry->currentSegmentPath = newPath;
     entry->fd = openWithRetry(newPath.c_str(), O_CREAT | O_RDWR | O_APPEND, 0644);
 
-    // Bump generation last: an acquire-reader observing the new value is guaranteed
-    // to also see the reset offset and new fd via the preceding release stores.
+    // Bump generation last so an acquire-reader that sees the new value also sees the
+    // reset offset and new fd from the preceding release stores.
     entry->generation.fetch_add(1, std::memory_order_acq_rel);
 
     return newPath;
@@ -342,7 +356,6 @@ std::string SegmentedStorage::generateSegmentPath(const std::string &filename, s
     auto now_time_t = std::chrono::system_clock::to_time_t(now);
     std::tm time_info;
 
-    // Linux-specific thread-safe version of localtime
     localtime_r(&now_time_t, &time_info);
 
     std::stringstream ss;

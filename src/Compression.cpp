@@ -3,114 +3,168 @@
 #include <cstring>
 #include <iostream>
 
-// Helper function to compress raw data using zlib
-std::vector<uint8_t> Compression::compress(std::vector<uint8_t> &&data, int level)
+Compression::Compression() = default;
+
+Compression::~Compression()
 {
-    if (data.empty())
+    if (m_deflateLevel != 0)
     {
-        return std::vector<uint8_t>();
+        deflateEnd(&m_deflateStream);
+    }
+    if (m_inflateInitialized)
+    {
+        inflateEnd(&m_inflateStream);
+    }
+}
+
+void Compression::compress(const uint8_t *data, size_t size, std::vector<uint8_t> &out, int level)
+{
+    out.clear();
+
+    if (size == 0)
+    {
+        return;
     }
 
-    z_stream zs;
-    std::memset(&zs, 0, sizeof(zs));
-
-    // Use the provided compression level instead of hardcoded Z_BEST_COMPRESSION
-    if (deflateInit(&zs, level) != Z_OK)
+    // Level changes force a full re-init because zlib's internal buffers are sized by it;
+    // same-level calls take the cheap deflateReset path.
+    if (m_deflateLevel != level)
     {
-        throw std::runtime_error("Failed to initialize zlib deflate");
+        if (m_deflateLevel != 0)
+        {
+            deflateEnd(&m_deflateStream);
+            m_deflateLevel = 0;
+        }
+        std::memset(&m_deflateStream, 0, sizeof(m_deflateStream));
+        if (deflateInit(&m_deflateStream, level) != Z_OK)
+        {
+            throw std::runtime_error("Failed to initialize zlib deflate");
+        }
+        m_deflateLevel = level;
+    }
+    else
+    {
+        if (deflateReset(&m_deflateStream) != Z_OK)
+        {
+            deflateEnd(&m_deflateStream);
+            m_deflateLevel = 0;
+            throw std::runtime_error("Failed to reset zlib deflate");
+        }
     }
 
-    zs.next_in = const_cast<Bytef *>(data.data());
-    zs.avail_in = data.size();
+    m_deflateStream.next_in = const_cast<Bytef *>(data);
+    m_deflateStream.avail_in = size;
 
     int ret;
     char outbuffer[32768];
-    std::vector<uint8_t> compressedData;
 
-    // Compress data in chunks
     do
     {
-        zs.next_out = reinterpret_cast<Bytef *>(outbuffer);
-        zs.avail_out = sizeof(outbuffer);
+        m_deflateStream.next_out = reinterpret_cast<Bytef *>(outbuffer);
+        m_deflateStream.avail_out = sizeof(outbuffer);
 
-        ret = deflate(&zs, Z_FINISH);
+        ret = deflate(&m_deflateStream, Z_FINISH);
 
-        if (compressedData.size() < zs.total_out)
+        if (out.size() < m_deflateStream.total_out)
         {
-            compressedData.insert(compressedData.end(),
-                                  outbuffer,
-                                  outbuffer + (zs.total_out - compressedData.size()));
+            out.insert(out.end(),
+                       outbuffer,
+                       outbuffer + (m_deflateStream.total_out - out.size()));
         }
     } while (ret == Z_OK);
 
-    deflateEnd(&zs);
-
     if (ret != Z_STREAM_END)
     {
+        // Abandon the stream; the next call will rebuild it.
+        deflateEnd(&m_deflateStream);
+        m_deflateLevel = 0;
         throw std::runtime_error("Exception during zlib compression");
     }
-
-    return compressedData;
 }
 
-// Helper function to decompress raw data using zlib
-std::vector<uint8_t> Compression::decompress(std::vector<uint8_t> &&compressedData,
-                                             size_t maxDecompressedSize)
+std::vector<uint8_t> Compression::compress(std::vector<uint8_t> &&data, int level)
 {
-    if (compressedData.empty())
+    std::vector<uint8_t> out;
+    compress(data.data(), data.size(), out, level);
+    return out;
+}
+
+void Compression::decompress(const uint8_t *data, size_t size, std::vector<uint8_t> &out,
+                              size_t maxDecompressedSize)
+{
+    out.clear();
+
+    if (size == 0)
     {
-        return std::vector<uint8_t>();
+        return;
     }
 
-    z_stream zs;
-    std::memset(&zs, 0, sizeof(zs));
-
-    if (inflateInit(&zs) != Z_OK)
+    if (!m_inflateInitialized)
     {
-        throw std::runtime_error("Failed to initialize zlib inflate");
+        std::memset(&m_inflateStream, 0, sizeof(m_inflateStream));
+        if (inflateInit(&m_inflateStream) != Z_OK)
+        {
+            throw std::runtime_error("Failed to initialize zlib inflate");
+        }
+        m_inflateInitialized = true;
+    }
+    else
+    {
+        if (inflateReset(&m_inflateStream) != Z_OK)
+        {
+            inflateEnd(&m_inflateStream);
+            m_inflateInitialized = false;
+            throw std::runtime_error("Failed to reset zlib inflate");
+        }
     }
 
-    zs.next_in = const_cast<Bytef *>(compressedData.data());
-    zs.avail_in = compressedData.size();
+    m_inflateStream.next_in = const_cast<Bytef *>(data);
+    m_inflateStream.avail_in = size;
 
     int ret;
     char outbuffer[32768];
-    std::vector<uint8_t> decompressedData;
 
-    // Decompress data in chunks
     do
     {
-        zs.next_out = reinterpret_cast<Bytef *>(outbuffer);
-        zs.avail_out = sizeof(outbuffer);
+        m_inflateStream.next_out = reinterpret_cast<Bytef *>(outbuffer);
+        m_inflateStream.avail_out = sizeof(outbuffer);
 
-        ret = inflate(&zs, Z_NO_FLUSH);
+        ret = inflate(&m_inflateStream, Z_NO_FLUSH);
 
         if (ret == Z_NEED_DICT || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR)
         {
-            inflateEnd(&zs);
+            inflateEnd(&m_inflateStream);
+            m_inflateInitialized = false;
             throw std::runtime_error("Exception during zlib decompression");
         }
 
-        if (zs.total_out > maxDecompressedSize)
+        if (m_inflateStream.total_out > maxDecompressedSize)
         {
-            inflateEnd(&zs);
+            inflateEnd(&m_inflateStream);
+            m_inflateInitialized = false;
             throw std::runtime_error("Decompressed data exceeds maxDecompressedSize");
         }
 
-        if (decompressedData.size() < zs.total_out)
+        if (out.size() < m_inflateStream.total_out)
         {
-            decompressedData.insert(decompressedData.end(),
-                                    outbuffer,
-                                    outbuffer + (zs.total_out - decompressedData.size()));
+            out.insert(out.end(),
+                       outbuffer,
+                       outbuffer + (m_inflateStream.total_out - out.size()));
         }
     } while (ret == Z_OK);
 
-    inflateEnd(&zs);
-
     if (ret != Z_STREAM_END)
     {
+        inflateEnd(&m_inflateStream);
+        m_inflateInitialized = false;
         throw std::runtime_error("Exception during zlib decompression");
     }
+}
 
-    return decompressedData;
+std::vector<uint8_t> Compression::decompress(std::vector<uint8_t> &&compressedData,
+                                             size_t maxDecompressedSize)
+{
+    std::vector<uint8_t> out;
+    decompress(compressedData.data(), compressedData.size(), out, maxDecompressedSize);
+    return out;
 }

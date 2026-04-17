@@ -35,7 +35,7 @@ int main()
 
         // Measure compression time
         auto start = std::chrono::high_resolution_clock::now();
-        std::vector<uint8_t> compressed = Compression::compress(std::move(serializedEntries), level);
+        std::vector<uint8_t> compressed = Compression{}.compress(std::move(serializedEntries), level);
         auto end = std::chrono::high_resolution_clock::now();
 
         size_t compressedSize = compressed.size();

@@ -10,7 +10,7 @@
 class LogEntry
 {
 public:
-    // Deserialization sanity caps so malformed size fields can't trigger huge allocations.
+    // Caps on deserialized sizes; reject inputs larger than these instead of allocating.
     static constexpr size_t MAX_STRING_SIZE = 1 * 1024 * 1024;
     static constexpr size_t MAX_PAYLOAD_SIZE = 16 * 1024 * 1024;
     static constexpr size_t MAX_ENTRY_SIZE = 32 * 1024 * 1024;
@@ -34,9 +34,15 @@ public:
 
     std::vector<uint8_t> serialize() &&;
     std::vector<uint8_t> serialize() const &;
+    // Append into a caller-owned buffer; no heap allocation if `out` has enough capacity.
+    void serialize(std::vector<uint8_t> &out) &&;
+    void serialize(std::vector<uint8_t> &out) const &;
+    size_t serializedSize() const;
     bool deserialize(std::vector<uint8_t> &&data);
 
     static std::vector<uint8_t> serializeBatch(std::vector<LogEntry> &&entries);
+    // Overwrites `out`.
+    static void serializeBatch(std::vector<LogEntry> &&entries, std::vector<uint8_t> &out);
     static std::vector<LogEntry> deserializeBatch(std::vector<uint8_t> &&batchData);
 
     ActionType getActionType() const { return m_actionType; }
@@ -48,19 +54,18 @@ public:
     const std::vector<uint8_t> &getPayload() const { return m_payload; }
 
 private:
-    // Helper methods for binary serialization
     void appendToVector(std::vector<uint8_t> &vec, const void *data, size_t size) const;
     void appendStringToVector(std::vector<uint8_t> &vec, const std::string &str) const;
     void appendStringToVector(std::vector<uint8_t> &vec, std::string &&str);
     bool extractStringFromVector(std::vector<uint8_t> &vec, size_t &offset, std::string &str);
 
-    ActionType m_actionType;                           // Type of GDPR operation
-    std::string m_dataLocation;                        // Location of the data being operated on
-    std::string m_dataControllerId;                    // ID of the entity controlling the data
-    std::string m_dataProcessorId;                     // ID of the entity performing the operation
-    std::string m_dataSubjectId;                       // ID of the data subject
-    std::chrono::system_clock::time_point m_timestamp; // When the operation occurred
-    std::vector<uint8_t> m_payload;                    // optional extra bytes
+    ActionType m_actionType;
+    std::string m_dataLocation;
+    std::string m_dataControllerId;
+    std::string m_dataProcessorId;
+    std::string m_dataSubjectId;
+    std::chrono::system_clock::time_point m_timestamp;
+    std::vector<uint8_t> m_payload;
 };
 
 #endif

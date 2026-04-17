@@ -42,7 +42,7 @@ private:
     Logger();
     Logger(const Logger &) = delete;
     Logger &operator=(const Logger &) = delete;
-    // Singleton instance
+
     static std::unique_ptr<Logger> s_instance;
     static std::mutex s_instanceMutex;
 
@@ -53,7 +53,6 @@ private:
     std::chrono::milliseconds m_appendTimeout;
     bool m_initialized;
 
-    // Helper to report errors
     void reportError(const std::string &message);
 };
 

@@ -24,8 +24,7 @@ public:
     void stop();
     bool isRunning() const;
 
-    // Entries discarded because their pipeline stage (serialize/compress/encrypt/write)
-    // threw; exposed so tests and monitoring can observe silent drops.
+    // Entries dropped by the pipeline (serialize/compress/encrypt/write threw).
     size_t droppedEntries() const { return m_droppedEntries.load(std::memory_order_acquire); }
 
 private:

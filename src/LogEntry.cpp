@@ -23,11 +23,11 @@ inline void appendLE64(std::vector<uint8_t> &v, uint64_t x)
 
 LogEntry::LogEntry()
     : m_actionType(ActionType::CREATE),
-      m_dataLocation(""),
-      m_dataControllerId(""),
-      m_dataProcessorId(""),
-      m_dataSubjectId(""),
-      m_timestamp(std::chrono::system_clock::now()),
+      m_dataLocation(),
+      m_dataControllerId(),
+      m_dataProcessorId(),
+      m_dataSubjectId(),
+      m_timestamp(),
       m_payload() {}
 
 LogEntry::LogEntry(ActionType actionType,
@@ -49,75 +49,74 @@ LogEntry::LogEntry(ActionType actionType,
 // Wire format (all integers little-endian):
 //   u32 actionType | 4× (u32 length + bytes) | u64 timestamp_ms | u32 payloadSize | payload
 
-std::vector<uint8_t> LogEntry::serialize() &&
+size_t LogEntry::serializedSize() const
 {
-    size_t totalSize =
-        sizeof(uint32_t) +                             // ActionType
-        sizeof(uint32_t) + m_dataLocation.size() +     // Size + data location
-        sizeof(uint32_t) + m_dataControllerId.size() + // Size + data controller ID
-        sizeof(uint32_t) + m_dataProcessorId.size() +  // Size + data processor ID
-        sizeof(uint32_t) + m_dataSubjectId.size() +    // Size + data subject ID
-        sizeof(uint64_t) +                             // Timestamp
-        sizeof(uint32_t) + m_payload.size();           // Size + payload data
+    return sizeof(uint32_t) +
+           sizeof(uint32_t) + m_dataLocation.size() +
+           sizeof(uint32_t) + m_dataControllerId.size() +
+           sizeof(uint32_t) + m_dataProcessorId.size() +
+           sizeof(uint32_t) + m_dataSubjectId.size() +
+           sizeof(uint64_t) +
+           sizeof(uint32_t) + m_payload.size();
+}
 
-    std::vector<uint8_t> result;
-    result.reserve(totalSize);
+void LogEntry::serialize(std::vector<uint8_t> &out) &&
+{
+    appendLE32(out, static_cast<uint32_t>(m_actionType));
 
-    appendLE32(result, static_cast<uint32_t>(m_actionType));
-
-    appendStringToVector(result, std::move(m_dataLocation));
-    appendStringToVector(result, std::move(m_dataControllerId));
-    appendStringToVector(result, std::move(m_dataProcessorId));
-    appendStringToVector(result, std::move(m_dataSubjectId));
+    appendStringToVector(out, std::move(m_dataLocation));
+    appendStringToVector(out, std::move(m_dataControllerId));
+    appendStringToVector(out, std::move(m_dataProcessorId));
+    appendStringToVector(out, std::move(m_dataSubjectId));
 
     int64_t timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
                             m_timestamp.time_since_epoch())
                             .count();
-    appendLE64(result, static_cast<uint64_t>(timestamp));
+    appendLE64(out, static_cast<uint64_t>(timestamp));
 
-    appendLE32(result, static_cast<uint32_t>(m_payload.size()));
+    appendLE32(out, static_cast<uint32_t>(m_payload.size()));
     if (!m_payload.empty())
     {
-        result.insert(result.end(),
-                      std::make_move_iterator(m_payload.begin()),
-                      std::make_move_iterator(m_payload.end()));
+        out.insert(out.end(),
+                   std::make_move_iterator(m_payload.begin()),
+                   std::make_move_iterator(m_payload.end()));
     }
+}
 
+void LogEntry::serialize(std::vector<uint8_t> &out) const &
+{
+    appendLE32(out, static_cast<uint32_t>(m_actionType));
+
+    appendStringToVector(out, m_dataLocation);
+    appendStringToVector(out, m_dataControllerId);
+    appendStringToVector(out, m_dataProcessorId);
+    appendStringToVector(out, m_dataSubjectId);
+
+    int64_t timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            m_timestamp.time_since_epoch())
+                            .count();
+    appendLE64(out, static_cast<uint64_t>(timestamp));
+
+    appendLE32(out, static_cast<uint32_t>(m_payload.size()));
+    if (!m_payload.empty())
+    {
+        appendToVector(out, m_payload.data(), m_payload.size());
+    }
+}
+
+std::vector<uint8_t> LogEntry::serialize() &&
+{
+    std::vector<uint8_t> result;
+    result.reserve(serializedSize());
+    std::move(*this).serialize(result);
     return result;
 }
 
 std::vector<uint8_t> LogEntry::serialize() const &
 {
-    size_t totalSize =
-        sizeof(uint32_t) +                             // ActionType
-        sizeof(uint32_t) + m_dataLocation.size() +     // Size + data location
-        sizeof(uint32_t) + m_dataControllerId.size() + // Size + data controller  ID
-        sizeof(uint32_t) + m_dataProcessorId.size() +  // Size + data processor  ID
-        sizeof(uint32_t) + m_dataSubjectId.size() +    // Size + data subject ID
-        sizeof(uint64_t) +                             // Timestamp
-        sizeof(uint32_t) + m_payload.size();           // Size + payload data
-
     std::vector<uint8_t> result;
-    result.reserve(totalSize);
-
-    appendLE32(result, static_cast<uint32_t>(m_actionType));
-
-    appendStringToVector(result, m_dataLocation);
-    appendStringToVector(result, m_dataControllerId);
-    appendStringToVector(result, m_dataProcessorId);
-    appendStringToVector(result, m_dataSubjectId);
-
-    int64_t timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            m_timestamp.time_since_epoch())
-                            .count();
-    appendLE64(result, static_cast<uint64_t>(timestamp));
-
-    appendLE32(result, static_cast<uint32_t>(m_payload.size()));
-    if (!m_payload.empty())
-    {
-        appendToVector(result, m_payload.data(), m_payload.size());
-    }
-
+    result.reserve(serializedSize());
+    serialize(result);
     return result;
 }
 
@@ -186,44 +185,43 @@ bool LogEntry::deserialize(std::vector<uint8_t> &&data)
     }
 }
 
-std::vector<uint8_t> LogEntry::serializeBatch(std::vector<LogEntry> &&entries)
+void LogEntry::serializeBatch(std::vector<LogEntry> &&entries, std::vector<uint8_t> &out)
 {
+    out.clear();
+
     if (entries.empty())
     {
-        std::vector<uint8_t> batchData(sizeof(uint32_t));
-        byteorder::writeLE32(batchData.data(), 0);
-        return batchData;
+        out.resize(sizeof(uint32_t));
+        byteorder::writeLE32(out.data(), 0);
+        return;
     }
 
-    size_t estimatedSize = sizeof(uint32_t);
+    size_t totalSize = sizeof(uint32_t);
     for (const auto &entry : entries)
     {
-        estimatedSize += sizeof(uint32_t) +     // Entry size field
-                         sizeof(uint32_t) +     // ActionType
-                         3 * sizeof(uint32_t) + // 3 string length fields
-                         entry.getDataLocation().size() +
-                         entry.getDataControllerId().size() +
-                         entry.getDataProcessorId().size() +
-                         entry.getDataSubjectId().size() +
-                         sizeof(uint64_t) + // Timestamp
-                         sizeof(uint32_t) + // Payload size
-                         entry.getPayload().size();
+        totalSize += sizeof(uint32_t) + entry.serializedSize();
     }
 
-    std::vector<uint8_t> batchData;
-    batchData.reserve(estimatedSize);
+    out.reserve(totalSize);
 
-    appendLE32(batchData, static_cast<uint32_t>(entries.size()));
+    appendLE32(out, static_cast<uint32_t>(entries.size()));
 
     for (auto &entry : entries)
     {
-        std::vector<uint8_t> entryData = std::move(entry).serialize();
-        appendLE32(batchData, static_cast<uint32_t>(entryData.size()));
-        batchData.insert(batchData.end(),
-                         std::make_move_iterator(entryData.begin()),
-                         std::make_move_iterator(entryData.end()));
+        // Placeholder for entry size; backpatched after we know how many bytes serialize wrote.
+        const size_t sizeFieldPos = out.size();
+        appendLE32(out, 0);
+        const size_t entryStart = out.size();
+        std::move(entry).serialize(out);
+        const size_t entrySize = out.size() - entryStart;
+        byteorder::writeLE32(out.data() + sizeFieldPos, static_cast<uint32_t>(entrySize));
     }
+}
 
+std::vector<uint8_t> LogEntry::serializeBatch(std::vector<LogEntry> &&entries)
+{
+    std::vector<uint8_t> batchData;
+    serializeBatch(std::move(entries), batchData);
     return batchData;
 }
 

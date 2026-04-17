@@ -35,12 +35,12 @@ TEST_F(CompressionTest, CompressDecompressBatch)
 {
     std::vector<LogEntry> batch = {entry1, entry2, entry3, entry4};
     std::vector<uint8_t> serializedBatch = LogEntry::serializeBatch(std::move(batch));
-    std::vector<uint8_t> compressed = Compression::compress(std::move(serializedBatch));
+    std::vector<uint8_t> compressed = Compression{}.compress(std::move(serializedBatch));
 
     // Make sure compression produced data
     ASSERT_GT(compressed.size(), 0);
 
-    std::vector<uint8_t> decompressed = Compression::decompress(std::move(compressed));
+    std::vector<uint8_t> decompressed = Compression{}.decompress(std::move(compressed));
     std::vector<LogEntry> recoveredBatch = LogEntry::deserializeBatch(std::move(decompressed));
 
     // Verify we got back the same number of entries
@@ -60,9 +60,9 @@ TEST_F(CompressionTest, EmptyBatch)
     // Create an empty batch
     std::vector<LogEntry> emptyBatch;
     std::vector<uint8_t> serializedBatch = LogEntry::serializeBatch(std::move(emptyBatch));
-    std::vector<uint8_t> compressed = Compression::compress(std::move(serializedBatch));
+    std::vector<uint8_t> compressed = Compression{}.compress(std::move(serializedBatch));
 
-    std::vector<uint8_t> decompressed = Compression::decompress(std::move(compressed));
+    std::vector<uint8_t> decompressed = Compression{}.decompress(std::move(compressed));
     std::vector<LogEntry> recoveredBatch = LogEntry::deserializeBatch(std::move(decompressed));
 
     // Verify we still have an empty vector
@@ -77,7 +77,7 @@ TEST_F(CompressionTest, InvalidCompressedData)
 
     // Verify that decompression failed
     EXPECT_THROW(
-        Compression::decompress(std::move(invalidData)),
+        Compression{}.decompress(std::move(invalidData)),
         std::runtime_error);
 }
 
@@ -91,13 +91,13 @@ TEST_F(CompressionTest, BatchCompressionRatio)
 
     std::vector<LogEntry> repetitiveBatch(batchSize, repetitiveEntry);
     std::vector<uint8_t> serializedBatch = LogEntry::serializeBatch(std::move(repetitiveBatch));
-    std::vector<uint8_t> compressed = Compression::compress(std::move(serializedBatch));
+    std::vector<uint8_t> compressed = Compression{}.compress(std::move(serializedBatch));
 
     // Check that batch compression significantly reduced the size
     double compressionRatio = static_cast<double>(compressed.size()) / static_cast<double>(serializedBatch.size());
     EXPECT_LT(compressionRatio, 0.05); // Expect at least 95% compression for batch
 
-    std::vector<uint8_t> decompressed = Compression::decompress(std::move(compressed));
+    std::vector<uint8_t> decompressed = Compression{}.decompress(std::move(compressed));
     std::vector<LogEntry> recoveredBatch = LogEntry::deserializeBatch(std::move(decompressed));
     // Verify the correct number of entries and their content
     ASSERT_EQ(repetitiveBatch.size(), recoveredBatch.size());
@@ -112,8 +112,8 @@ TEST_F(CompressionTest, LargeBatch)
 {
     std::vector<LogEntry> largeBatch(100, entry1);
     std::vector<uint8_t> serializedBatch = LogEntry::serializeBatch(std::move(largeBatch));
-    std::vector<uint8_t> compressed = Compression::compress(std::move(serializedBatch));
-    std::vector<uint8_t> decompressed = Compression::decompress(std::move(compressed));
+    std::vector<uint8_t> compressed = Compression{}.compress(std::move(serializedBatch));
+    std::vector<uint8_t> decompressed = Compression{}.decompress(std::move(compressed));
     std::vector<LogEntry> recoveredBatch = LogEntry::deserializeBatch(std::move(decompressed));
 
     // Verify the correct number of entries
@@ -132,14 +132,14 @@ TEST_F(CompressionTest, DecompressCapEnforced)
     const size_t inputSize = 5 * 1024 * 1024;
     std::vector<uint8_t> zeros(inputSize, 0);
     std::vector<uint8_t> zerosCopy = zeros;
-    std::vector<uint8_t> compressed = Compression::compress(std::move(zeros));
+    std::vector<uint8_t> compressed = Compression{}.compress(std::move(zeros));
     ASSERT_LT(compressed.size(), inputSize / 10);
 
     EXPECT_THROW(
-        Compression::decompress(std::vector<uint8_t>(compressed), /*maxDecompressedSize*/ 1 * 1024 * 1024),
+        Compression{}.decompress(std::vector<uint8_t>(compressed), /*maxDecompressedSize*/ 1 * 1024 * 1024),
         std::runtime_error);
 
-    std::vector<uint8_t> round_tripped = Compression::decompress(
+    std::vector<uint8_t> round_tripped = Compression{}.decompress(
         std::move(compressed), /*maxDecompressedSize*/ 10 * 1024 * 1024);
     EXPECT_EQ(round_tripped.size(), inputSize);
     EXPECT_EQ(round_tripped, zerosCopy);

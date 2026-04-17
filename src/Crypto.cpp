@@ -8,7 +8,6 @@
 
 Crypto::Crypto()
 {
-    // Initialize OpenSSL
     OpenSSL_add_all_algorithms();
     m_encryptCtx = EVP_CIPHER_CTX_new();
     if (!m_encryptCtx)
@@ -38,12 +37,15 @@ Crypto::~Crypto()
 }
 
 // Wire format (little-endian): [u32 dataSize][ciphertext, dataSize bytes][tag, GCM_TAG_SIZE bytes]
-std::vector<uint8_t> Crypto::encrypt(std::vector<uint8_t> &&plaintext,
-                                     const std::vector<uint8_t> &key,
-                                     const std::vector<uint8_t> &iv)
+void Crypto::encrypt(const uint8_t *plaintext, size_t plaintextLen,
+                     const std::vector<uint8_t> &key,
+                     const std::vector<uint8_t> &iv,
+                     std::vector<uint8_t> &out)
 {
-    if (plaintext.empty())
-        return {};
+    out.clear();
+
+    if (plaintextLen == 0)
+        return;
     if (key.size() != KEY_SIZE)
         throw std::runtime_error("Invalid key size");
     if (iv.size() != GCM_IV_SIZE)
@@ -57,39 +59,45 @@ std::vector<uint8_t> Crypto::encrypt(std::vector<uint8_t> &&plaintext,
     }
 
     const size_t sizeFieldSize = sizeof(uint32_t);
-    const size_t ciphertextSize = plaintext.size();
+    const size_t ciphertextSize = plaintextLen;
     const size_t totalSize = sizeFieldSize + ciphertextSize + GCM_TAG_SIZE;
 
-    std::vector<uint8_t> result(totalSize);
+    out.resize(totalSize);
 
-    byteorder::writeLE32(result.data(), static_cast<uint32_t>(ciphertextSize));
+    byteorder::writeLE32(out.data(), static_cast<uint32_t>(ciphertextSize));
 
     int encryptedLen = 0;
-    if (EVP_EncryptUpdate(m_encryptCtx, result.data() + sizeFieldSize, &encryptedLen,
-                          plaintext.data(), plaintext.size()) != 1)
+    if (EVP_EncryptUpdate(m_encryptCtx, out.data() + sizeFieldSize, &encryptedLen,
+                          plaintext, plaintextLen) != 1)
     {
         throw std::runtime_error("Failed during encryption update");
     }
 
     int finalLen = 0;
-    if (EVP_EncryptFinal_ex(m_encryptCtx, result.data() + sizeFieldSize + encryptedLen, &finalLen) != 1)
+    if (EVP_EncryptFinal_ex(m_encryptCtx, out.data() + sizeFieldSize + encryptedLen, &finalLen) != 1)
     {
         throw std::runtime_error("Failed to finalize encryption");
     }
 
-    // For GCM, encryptedLen + finalLen should equal plaintext.size()
-    if (encryptedLen + finalLen != static_cast<int>(plaintext.size()))
+    if (encryptedLen + finalLen != static_cast<int>(plaintextLen))
     {
         throw std::runtime_error("Unexpected encryption output size");
     }
 
     if (EVP_CIPHER_CTX_ctrl(m_encryptCtx, EVP_CTRL_GCM_GET_TAG, GCM_TAG_SIZE,
-                            result.data() + sizeFieldSize + ciphertextSize) != 1)
+                            out.data() + sizeFieldSize + ciphertextSize) != 1)
     {
         throw std::runtime_error("Failed to get authentication tag");
     }
+}
 
-    return result;
+std::vector<uint8_t> Crypto::encrypt(std::vector<uint8_t> &&plaintext,
+                                     const std::vector<uint8_t> &key,
+                                     const std::vector<uint8_t> &iv)
+{
+    std::vector<uint8_t> out;
+    encrypt(plaintext.data(), plaintext.size(), key, iv, out);
+    return out;
 }
 
 std::vector<uint8_t> Crypto::decrypt(const std::vector<uint8_t> &encryptedData,
@@ -132,7 +140,7 @@ std::vector<uint8_t> Crypto::decrypt(const std::vector<uint8_t> &encryptedData,
         throw std::runtime_error("Encrypted data too small - missing authentication tag");
     }
 
-    // OpenSSL takes a non-const pointer for the tag; we copy into a local buffer.
+    // EVP_CIPHER_CTX_ctrl takes a non-const pointer, so we copy the tag out.
     std::vector<uint8_t> tag(GCM_TAG_SIZE);
     std::memcpy(tag.data(), encryptedData.data() + position, GCM_TAG_SIZE);
 

@@ -60,7 +60,7 @@ std::vector<LogEntry> decryptSegmentToEntries(const std::vector<uint8_t> &segmen
     for (auto &blob : splitSegmentIntoBlobs(segment))
     {
         auto plaintext = crypto.decrypt(blob, key, iv);
-        auto decompressed = Compression::decompress(std::move(plaintext));
+        auto decompressed = Compression{}.decompress(std::move(plaintext));
         auto entries = LogEntry::deserializeBatch(std::move(decompressed));
         for (auto &e : entries)
             out.emplace_back(std::move(e));

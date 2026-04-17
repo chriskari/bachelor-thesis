@@ -21,10 +21,11 @@ bool BufferQueue::enqueueBlocking(QueueItem item, ProducerToken &token, std::chr
     int backoffMs = 1;
     const int maxBackoffMs = 100;
 
+    // moodycamel's try_enqueue leaves the source untouched on capacity failure, so the
+    // same `item` can be re-moved on each retry.
     while (true)
     {
-        QueueItem itemCopy = item;
-        if (enqueue(std::move(itemCopy), token))
+        if (m_queue.try_enqueue(token, std::move(item)))
         {
             return true;
         }
@@ -37,7 +38,7 @@ bool BufferQueue::enqueueBlocking(QueueItem item, ProducerToken &token, std::chr
 
         int sleepTime = backoffMs;
 
-        // Make sure we don't sleep longer than our remaining timeout
+        // Don't sleep past the remaining timeout.
         if (timeout != std::chrono::milliseconds::max())
         {
             auto remainingTime = timeout - elapsed;
@@ -64,10 +65,13 @@ bool BufferQueue::enqueueBatchBlocking(std::vector<QueueItem> items, ProducerTok
     int backoffMs = 1;
     const int maxBackoffMs = 100;
 
+    // try_enqueue_bulk is all-or-nothing on capacity failure: no slot is constructed
+    // and the iterator is not advanced, so items stay intact for retry.
     while (true)
     {
-        std::vector<QueueItem> itemsCopy = items;
-        if (enqueueBatch(std::move(itemsCopy), token))
+        if (m_queue.try_enqueue_bulk(token,
+                                     std::make_move_iterator(items.begin()),
+                                     items.size()))
         {
             return true;
         }
@@ -80,7 +84,6 @@ bool BufferQueue::enqueueBatchBlocking(std::vector<QueueItem> items, ProducerTok
 
         int sleepTime = backoffMs;
 
-        // Make sure we don't sleep longer than our remaining timeout
         if (timeout != std::chrono::milliseconds::max())
         {
             auto remainingTime = timeout - elapsed;

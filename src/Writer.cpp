@@ -3,7 +3,9 @@
 #include "Compression.hpp"
 #include <iostream>
 #include <chrono>
-#include <map>
+#include <optional>
+#include <string>
+#include <unordered_map>
 
 Writer::Writer(BufferQueue &queue,
                std::shared_ptr<SegmentedStorage> storage,
@@ -55,8 +57,14 @@ void Writer::processLogEntries()
     std::vector<QueueItem> batch;
 
     Crypto crypto;
-    std::vector<uint8_t> encryptionKey(crypto.KEY_SIZE, 0x42); // dummy key
-    std::vector<uint8_t> dummyIV(crypto.GCM_IV_SIZE, 0x24);    // dummy IV
+    Compression compression;
+    std::vector<uint8_t> encryptionKey(crypto.KEY_SIZE, 0x42); // placeholder
+    std::vector<uint8_t> dummyIV(crypto.GCM_IV_SIZE, 0x24);    // placeholder
+
+    // Reused across loop iterations so clear() keeps the underlying allocations.
+    std::unordered_map<std::optional<std::string>, std::vector<LogEntry>> groupedEntries;
+    std::vector<uint8_t> scratchA;
+    std::vector<uint8_t> scratchB;
 
     while (m_running)
     {
@@ -67,7 +75,7 @@ void Writer::processLogEntries()
             continue;
         }
 
-        std::map<std::optional<std::string>, std::vector<LogEntry>> groupedEntries;
+        groupedEntries.clear();
         for (auto &item : batch)
         {
             groupedEntries[item.targetFilename].emplace_back(std::move(item.entry));
@@ -78,26 +86,28 @@ void Writer::processLogEntries()
             const size_t groupSize = entries.size();
             try
             {
-                std::vector<uint8_t> processedData = LogEntry::serializeBatch(std::move(entries));
+                LogEntry::serializeBatch(std::move(entries), scratchA);
+                std::vector<uint8_t> *current = &scratchA;
+                std::vector<uint8_t> *other = &scratchB;
 
-                // Apply compression if enabled
                 if (m_compressionLevel > 0)
                 {
-                    processedData = Compression::compress(std::move(processedData), m_compressionLevel);
+                    compression.compress(current->data(), current->size(), *other, m_compressionLevel);
+                    std::swap(current, other);
                 }
-                // Apply encryption if enabled
                 if (m_useEncryption)
                 {
-                    processedData = crypto.encrypt(std::move(processedData), encryptionKey, dummyIV);
+                    crypto.encrypt(current->data(), current->size(), encryptionKey, dummyIV, *other);
+                    std::swap(current, other);
                 }
 
                 if (targetFilename)
                 {
-                    m_storage->writeToFile(*targetFilename, std::move(processedData));
+                    m_storage->writeToFile(*targetFilename, current->data(), current->size());
                 }
                 else
                 {
-                    m_storage->write(std::move(processedData));
+                    m_storage->write(current->data(), current->size());
                 }
             }
             catch (const std::exception &e)

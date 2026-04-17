@@ -18,9 +18,7 @@ TEST(LogEntryTest1, DefaultConstructor_InitializesCorrectly)
     EXPECT_EQ(entry.getDataSubjectId(), "");
     EXPECT_EQ(entry.getPayload().size(), 0);
 
-    auto now = std::chrono::system_clock::now();
-    EXPECT_NEAR(std::chrono::system_clock::to_time_t(entry.getTimestamp()),
-                std::chrono::system_clock::to_time_t(now), 1);
+    EXPECT_EQ(entry.getTimestamp(), std::chrono::system_clock::time_point{});
 }
 
 // Test parameterized constructor
