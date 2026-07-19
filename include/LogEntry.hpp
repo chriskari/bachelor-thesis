@@ -46,10 +46,12 @@ public:
     static std::vector<LogEntry> deserializeBatch(std::vector<uint8_t> &&batchData);
 
     ActionType getActionType() const { return m_actionType; }
-    std::string getDataLocation() const { return m_dataLocation; }
-    std::string getDataControllerId() const { return m_dataControllerId; }
-    std::string getDataProcessorId() const { return m_dataProcessorId; }
-    std::string getDataSubjectId() const { return m_dataSubjectId; }
+    // By reference: export filters/serialization read these per entry, and
+    // by-value getters cost four string copies per exported entry.
+    const std::string &getDataLocation() const { return m_dataLocation; }
+    const std::string &getDataControllerId() const { return m_dataControllerId; }
+    const std::string &getDataProcessorId() const { return m_dataProcessorId; }
+    const std::string &getDataSubjectId() const { return m_dataSubjectId; }
     std::chrono::system_clock::time_point getTimestamp() const { return m_timestamp; }
     const std::vector<uint8_t> &getPayload() const { return m_payload; }
 

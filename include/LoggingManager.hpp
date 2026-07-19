@@ -8,6 +8,8 @@
 #include "SeqnumAllocator.hpp"
 #include "Writer.hpp"
 #include "LogEntry.hpp"
+#include "LogExporter.hpp"
+#include <map>
 #include <memory>
 #include <vector>
 #include <atomic>
@@ -56,6 +58,10 @@ private:
     int m_compressionLevel;
     std::string m_basePath;
     std::string m_baseFilename;
+    std::chrono::milliseconds m_appendTimeout;
+    // Per-target on-disk state found at construction; keeps seqnums
+    // continuing across runs and avoids rewriting seals for untouched targets.
+    std::map<std::string, RecoveredTargetState> m_recoveredStates;
 };
 
 #endif

@@ -5,9 +5,20 @@
 #include <chrono>
 #include <cmath>
 
-BufferQueue::BufferQueue(size_t capacity, size_t maxExplicitProducers)
+namespace
 {
-    m_queue = moodycamel::ConcurrentQueue<QueueItem>(capacity, maxExplicitProducers, 0);
+// milliseconds::max() converted to a finer duration (as duration comparison
+// operators do) overflows and wraps negative, so it must never reach a
+// duration comparison. Treat it as "no deadline" explicitly instead.
+constexpr bool isInfinite(std::chrono::milliseconds timeout)
+{
+    return timeout == std::chrono::milliseconds::max();
+}
+} // namespace
+
+BufferQueue::BufferQueue(size_t capacity, size_t maxExplicitProducers)
+    : m_queue(capacity, maxExplicitProducers, 0)
+{
 }
 
 bool BufferQueue::enqueue(QueueItem item, ProducerToken &token)
@@ -31,7 +42,7 @@ bool BufferQueue::enqueueBlocking(QueueItem item, ProducerToken &token, std::chr
         }
 
         auto elapsed = std::chrono::steady_clock::now() - start;
-        if (elapsed >= timeout)
+        if (!isInfinite(timeout) && elapsed >= timeout)
         {
             return false;
         }
@@ -39,7 +50,7 @@ bool BufferQueue::enqueueBlocking(QueueItem item, ProducerToken &token, std::chr
         int sleepTime = backoffMs;
 
         // Don't sleep past the remaining timeout.
-        if (timeout != std::chrono::milliseconds::max())
+        if (!isInfinite(timeout))
         {
             auto remainingTime = timeout - elapsed;
             if (remainingTime <= std::chrono::milliseconds(sleepTime))
@@ -64,6 +75,7 @@ bool BufferQueue::enqueueBatchBlocking(std::vector<QueueItem> items, ProducerTok
     auto start = std::chrono::steady_clock::now();
     int backoffMs = 1;
     const int maxBackoffMs = 100;
+    int emptyFailures = 0;
 
     // try_enqueue_bulk is all-or-nothing on capacity failure: no slot is constructed
     // and the iterator is not advanced, so items stay intact for retry.
@@ -76,15 +88,32 @@ bool BufferQueue::enqueueBatchBlocking(std::vector<QueueItem> items, ProducerTok
             return true;
         }
 
+        // A bulk enqueue that repeatedly fails against an EMPTY queue cannot
+        // fit at all (the batch exceeds the block pool available to this
+        // producer), so waiting for consumers cannot help — fail fast instead
+        // of spinning for the full timeout. Three consecutive checks guard
+        // against the transient window where a concurrent drain has emptied
+        // the queue but its blocks are not yet recycled.
+        if (m_queue.size_approx() == 0)
+        {
+            if (++emptyFailures >= 3)
+            {
+                return false;
+            }
+            std::this_thread::yield();
+            continue;
+        }
+        emptyFailures = 0;
+
         auto elapsed = std::chrono::steady_clock::now() - start;
-        if (elapsed >= timeout)
+        if (!isInfinite(timeout) && elapsed >= timeout)
         {
             return false;
         }
 
         int sleepTime = backoffMs;
 
-        if (timeout != std::chrono::milliseconds::max())
+        if (!isInfinite(timeout))
         {
             auto remainingTime = timeout - elapsed;
             if (remainingTime <= std::chrono::milliseconds(sleepTime))
@@ -118,12 +147,25 @@ size_t BufferQueue::tryDequeueBatch(std::vector<QueueItem> &items, size_t maxIte
     return dequeued;
 }
 
+size_t BufferQueue::waitDequeueBatch(std::vector<QueueItem> &items, size_t maxItems,
+                                     ConsumerToken &token, std::chrono::milliseconds timeout)
+{
+    items.clear();
+    items.resize(maxItems);
+
+    size_t dequeued = m_queue.wait_dequeue_bulk_timed(token, items.begin(), maxItems, timeout);
+    items.resize(dequeued);
+
+    return dequeued;
+}
+
 bool BufferQueue::flush()
 {
-    do
+    // Check before sleeping: an already-empty queue must not pay any wait.
+    while (m_queue.size_approx() != 0)
     {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    } while (m_queue.size_approx() != 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
 
     return true;
 }

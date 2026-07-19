@@ -92,8 +92,10 @@ TEST_F(BufferQueueBasicTest, EnqueueUntilFull)
     // Queue should be full now
     EXPECT_EQ(queue->size(), QUEUE_CAPACITY);
 
-    // Testing that enqueue fails
-    EXPECT_FALSE(queue->enqueueBlocking(createTestItem(123), producerToken));
+    // Testing that enqueue fails with a short finite timeout. (The default
+    // timeout is infinite and would correctly block forever here.)
+    EXPECT_FALSE(queue->enqueueBlocking(createTestItem(123), producerToken,
+                                        std::chrono::milliseconds(10)));
 
     // With longer timeout, enqueue should block and eventually fail too since no consumer
     auto start = std::chrono::steady_clock::now();
@@ -116,8 +118,10 @@ TEST_F(BufferQueueBasicTest, EnqueueWithConsumer)
 
     EXPECT_EQ(queue->size(), QUEUE_CAPACITY);
 
-    // Testing that enqueue fails
-    EXPECT_FALSE(queue->enqueueBlocking(createTestItem(123), producerToken));
+    // Testing that enqueue fails with a short finite timeout. (The default
+    // timeout is infinite and would correctly block forever here.)
+    EXPECT_FALSE(queue->enqueueBlocking(createTestItem(123), producerToken,
+                                        std::chrono::milliseconds(10)));
 
     BufferQueue::ConsumerToken consumerToken = queue->createConsumerToken();
     QueueItem retrievedItem;

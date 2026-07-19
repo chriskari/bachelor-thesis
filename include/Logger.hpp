@@ -8,19 +8,21 @@
 #include <chrono>
 #include <memory>
 #include <vector>
-#include <shared_mutex>
 #include <functional>
 #include <optional>
 
 class Logger
 {
-    friend class LoggerTest;
-
 public:
     static Logger &getInstance();
 
     bool initialize(std::shared_ptr<BufferQueue> queue,
                     std::chrono::milliseconds appendTimeout = std::chrono::milliseconds::max());
+    // Idempotent variant for restart paths: succeeds if uninitialized OR
+    // already bound to the same queue (refreshing the timeout); fails only if
+    // a different queue owns the singleton.
+    bool ensureInitialized(std::shared_ptr<BufferQueue> queue,
+                           std::chrono::milliseconds appendTimeout);
 
     BufferQueue::ProducerToken createProducerToken();
     bool append(LogEntry entry,
@@ -31,6 +33,9 @@ public:
                      const std::optional<std::string> &filename = std::nullopt);
 
     bool reset();
+    // Releases the singleton only if it is bound to `queue`; lets a
+    // LoggingManager release on destruction without clobbering a successor.
+    bool resetIf(const std::shared_ptr<BufferQueue> &queue);
 
     ~Logger();
 
@@ -38,9 +43,6 @@ private:
     Logger();
     Logger(const Logger &) = delete;
     Logger &operator=(const Logger &) = delete;
-
-    static std::unique_ptr<Logger> s_instance;
-    static std::mutex s_instanceMutex;
 
     // Readers snapshot m_logQueue under this lock and then use the snapshot unlocked,
     // so reset() can null the member without racing an in-flight enqueue.

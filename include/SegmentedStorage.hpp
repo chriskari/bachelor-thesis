@@ -18,6 +18,9 @@
 
 class SegmentedStorage
 {
+private:
+    struct CacheEntry;
+
 public:
     SegmentedStorage(const std::string &basePath,
                      const std::string &baseFilename,
@@ -28,12 +31,36 @@ public:
 
     ~SegmentedStorage();
 
+    // Per-caller cache of a target's file state. Repeated writes through a
+    // handle skip the global LRU mutex entirely; the handle refreshes itself
+    // when its entry was evicted or rotated away (fd closed).
+    class WriteHandle
+    {
+        friend class SegmentedStorage;
+
+    public:
+        WriteHandle() = default;
+
+    private:
+        std::string m_filename;
+        std::shared_ptr<CacheEntry> m_entry;
+    };
+
+    WriteHandle createWriteHandle(std::string filename);
+    size_t write(WriteHandle &handle, const uint8_t *data, size_t size);
+
     size_t write(std::vector<uint8_t> &&data);
     size_t write(const uint8_t *data, size_t size);
     size_t writeToFile(const std::string &filename, std::vector<uint8_t> &&data);
     // Pointer/size overload so the caller keeps ownership of the buffer.
     size_t writeToFile(const std::string &filename, const uint8_t *data, size_t size);
     void flush();
+
+    const std::string &baseFilename() const { return m_baseFilename; }
+
+    // Target filenames become path components under basePath; anything that
+    // could traverse out of it (separators, "..", empty) is invalid.
+    static bool isValidTargetFilename(const std::string &filename);
 
 private:
     std::string m_basePath;
@@ -86,6 +113,11 @@ private:
     };
 
     LRUCache m_cache;
+
+    // Shared write loop; `entry` may be null or stale and is refreshed in
+    // place (so WriteHandle callers keep the refreshed entry).
+    size_t writeInternal(const std::string &filename, std::shared_ptr<CacheEntry> &entry,
+                         const uint8_t *data, size_t size);
 
     std::string rotateSegment(const std::string &filename, std::shared_ptr<CacheEntry> entry);
     std::string generateSegmentPath(const std::string &filename, size_t segmentIndex) const;

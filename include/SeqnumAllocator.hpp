@@ -19,6 +19,10 @@ public:
 
     uint64_t peek(const std::string &target) const;
 
+    // Pre-loads the counter for `target` so seqnums continue after batches
+    // already on disk from earlier runs. Never lowers an existing counter.
+    void seed(const std::string &target, uint64_t count);
+
     // (target, count) pairs where count is the number of seqnums already issued.
     std::vector<std::pair<std::string, uint64_t>> snapshot() const;
 

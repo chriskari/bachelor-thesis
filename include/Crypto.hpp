@@ -20,6 +20,11 @@ class Crypto
 private:
     EVP_CIPHER_CTX *m_encryptCtx;
     EVP_CIPHER_CTX *m_decryptCtx;
+    // Last key bound to each context. While the key is unchanged, per-call
+    // init only sets the IV, skipping the AES-256 key schedule. Cleared on
+    // any mid-operation failure (context state is then undefined).
+    std::vector<uint8_t> m_encryptKeyCache;
+    std::vector<uint8_t> m_decryptKeyCache;
 
 public:
     Crypto();
@@ -49,6 +54,11 @@ public:
     // Reads seqnum from the blob header and reconstructs AAD from seqnum + targetName.
     // Throws TamperDetectedException on any tag mismatch.
     std::vector<uint8_t> decrypt(const std::vector<uint8_t> &encryptedData,
+                                 const std::vector<uint8_t> &key,
+                                 const uint8_t *targetName, size_t targetNameLen);
+    // Pointer/length variant so callers can decrypt a blob in place inside a
+    // larger buffer (e.g. a loaded segment) without slicing it out first.
+    std::vector<uint8_t> decrypt(const uint8_t *encryptedData, size_t encryptedLen,
                                  const std::vector<uint8_t> &key,
                                  const uint8_t *targetName, size_t targetNameLen);
 

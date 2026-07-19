@@ -20,7 +20,7 @@ public:
                     std::shared_ptr<SegmentedStorage> storage,
                     size_t batchSize = 100,
                     bool useEncryption = true,
-                    int m_compressionLevel = 9,
+                    int m_compressionLevel = 3,
                     std::shared_ptr<SeqnumAllocator> seqnumAllocator = nullptr,
                     std::string baseFilename = "");
 

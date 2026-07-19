@@ -8,7 +8,9 @@
 
 Crypto::Crypto()
 {
-    OpenSSL_add_all_algorithms();
+    // No OpenSSL_add_all_algorithms()/EVP_cleanup(): both are deprecated
+    // no-ops since OpenSSL 1.1, and EVP_cleanup() on 1.0 tore down GLOBAL
+    // algorithm tables while other Crypto instances were still live.
     m_encryptCtx = EVP_CIPHER_CTX_new();
     if (!m_encryptCtx)
     {
@@ -33,7 +35,6 @@ Crypto::~Crypto()
     {
         EVP_CIPHER_CTX_free(m_decryptCtx);
     }
-    EVP_cleanup();
 }
 
 std::vector<uint8_t> Crypto::buildAad(uint64_t seqnum,
@@ -99,45 +100,64 @@ void Crypto::encrypt(const uint8_t *plaintext, size_t plaintextLen,
         throw std::runtime_error("Failed to generate random IV");
     }
 
-    EVP_CIPHER_CTX_reset(m_encryptCtx);
-
-    if (EVP_EncryptInit_ex(m_encryptCtx, EVP_aes_256_gcm(), nullptr, key.data(), ivPtr) != 1)
+    try
     {
-        throw std::runtime_error("Failed to initialize encryption");
+        // Bind cipher + key only when the key changed; otherwise the per-call
+        // init sets just the fresh IV and skips the AES-256 key schedule.
+        if (m_encryptKeyCache != key)
+        {
+            if (EVP_EncryptInit_ex(m_encryptCtx, EVP_aes_256_gcm(), nullptr, key.data(),
+                                   nullptr) != 1)
+            {
+                throw std::runtime_error("Failed to initialize encryption key");
+            }
+            m_encryptKeyCache = key;
+        }
+        if (EVP_EncryptInit_ex(m_encryptCtx, nullptr, nullptr, nullptr, ivPtr) != 1)
+        {
+            throw std::runtime_error("Failed to initialize encryption");
+        }
+
+        const auto aad = buildAad(seqnum, targetName, targetNameLen);
+        int aadOut = 0;
+        if (EVP_EncryptUpdate(m_encryptCtx, nullptr, &aadOut, aad.data(),
+                              static_cast<int>(aad.size())) != 1)
+        {
+            throw std::runtime_error("Failed to feed AAD into encryption");
+        }
+
+        const size_t ciphertextOffset = sizeFieldSize + SEQNUM_SIZE + GCM_IV_SIZE;
+
+        int encryptedLen = 0;
+        if (EVP_EncryptUpdate(m_encryptCtx, out.data() + ciphertextOffset, &encryptedLen,
+                              plaintext, plaintextLen) != 1)
+        {
+            throw std::runtime_error("Failed during encryption update");
+        }
+
+        int finalLen = 0;
+        if (EVP_EncryptFinal_ex(m_encryptCtx, out.data() + ciphertextOffset + encryptedLen, &finalLen) != 1)
+        {
+            throw std::runtime_error("Failed to finalize encryption");
+        }
+
+        if (encryptedLen + finalLen != static_cast<int>(plaintextLen))
+        {
+            throw std::runtime_error("Unexpected encryption output size");
+        }
+
+        if (EVP_CIPHER_CTX_ctrl(m_encryptCtx, EVP_CTRL_GCM_GET_TAG, GCM_TAG_SIZE,
+                                out.data() + ciphertextOffset + ciphertextSize) != 1)
+        {
+            throw std::runtime_error("Failed to get authentication tag");
+        }
     }
-
-    const auto aad = buildAad(seqnum, targetName, targetNameLen);
-    int aadOut = 0;
-    if (EVP_EncryptUpdate(m_encryptCtx, nullptr, &aadOut, aad.data(),
-                          static_cast<int>(aad.size())) != 1)
+    catch (...)
     {
-        throw std::runtime_error("Failed to feed AAD into encryption");
-    }
-
-    const size_t ciphertextOffset = sizeFieldSize + SEQNUM_SIZE + GCM_IV_SIZE;
-
-    int encryptedLen = 0;
-    if (EVP_EncryptUpdate(m_encryptCtx, out.data() + ciphertextOffset, &encryptedLen,
-                          plaintext, plaintextLen) != 1)
-    {
-        throw std::runtime_error("Failed during encryption update");
-    }
-
-    int finalLen = 0;
-    if (EVP_EncryptFinal_ex(m_encryptCtx, out.data() + ciphertextOffset + encryptedLen, &finalLen) != 1)
-    {
-        throw std::runtime_error("Failed to finalize encryption");
-    }
-
-    if (encryptedLen + finalLen != static_cast<int>(plaintextLen))
-    {
-        throw std::runtime_error("Unexpected encryption output size");
-    }
-
-    if (EVP_CIPHER_CTX_ctrl(m_encryptCtx, EVP_CTRL_GCM_GET_TAG, GCM_TAG_SIZE,
-                            out.data() + ciphertextOffset + ciphertextSize) != 1)
-    {
-        throw std::runtime_error("Failed to get authentication tag");
+        // Context state is undefined after a failure; force a full re-init.
+        m_encryptKeyCache.clear();
+        EVP_CIPHER_CTX_reset(m_encryptCtx);
+        throw;
     }
 }
 
@@ -160,7 +180,14 @@ std::vector<uint8_t> Crypto::decrypt(const std::vector<uint8_t> &encryptedData,
                                      const std::vector<uint8_t> &key,
                                      const uint8_t *targetName, size_t targetNameLen)
 {
-    if (encryptedData.empty())
+    return decrypt(encryptedData.data(), encryptedData.size(), key, targetName, targetNameLen);
+}
+
+std::vector<uint8_t> Crypto::decrypt(const uint8_t *encryptedData, size_t encryptedLen,
+                                     const std::vector<uint8_t> &key,
+                                     const uint8_t *targetName, size_t targetNameLen)
+{
+    if (encryptedLen == 0)
     {
         return std::vector<uint8_t>();
     }
@@ -171,76 +198,94 @@ std::vector<uint8_t> Crypto::decrypt(const std::vector<uint8_t> &encryptedData,
     }
 
     const size_t headerSize = sizeof(uint32_t) + SEQNUM_SIZE + GCM_IV_SIZE;
-    if (encryptedData.size() < headerSize)
+    if (encryptedLen < headerSize)
     {
         throw std::runtime_error("Encrypted data too small - missing header");
     }
 
-    uint32_t dataSize = byteorder::readLE32(encryptedData.data());
+    uint32_t dataSize = byteorder::readLE32(encryptedData);
     size_t position = sizeof(uint32_t);
 
-    uint64_t seqnum = byteorder::readLE64(encryptedData.data() + position);
+    uint64_t seqnum = byteorder::readLE64(encryptedData + position);
     position += SEQNUM_SIZE;
 
-    const uint8_t *ivPtr = encryptedData.data() + position;
+    const uint8_t *ivPtr = encryptedData + position;
     position += GCM_IV_SIZE;
 
-    if (position + dataSize > encryptedData.size())
+    if (position + dataSize > encryptedLen)
     {
         throw std::runtime_error("Encrypted data too small - missing complete data");
     }
 
-    const uint8_t *ciphertextPtr = encryptedData.data() + position;
+    const uint8_t *ciphertextPtr = encryptedData + position;
     position += dataSize;
 
-    if (position + GCM_TAG_SIZE > encryptedData.size())
+    if (position + GCM_TAG_SIZE > encryptedLen)
     {
         throw std::runtime_error("Encrypted data too small - missing authentication tag");
     }
 
     // EVP_CIPHER_CTX_ctrl takes a non-const pointer, so we copy the tag out.
     std::vector<uint8_t> tag(GCM_TAG_SIZE);
-    std::memcpy(tag.data(), encryptedData.data() + position, GCM_TAG_SIZE);
+    std::memcpy(tag.data(), encryptedData + position, GCM_TAG_SIZE);
 
-    EVP_CIPHER_CTX_reset(m_decryptCtx);
-
-    if (EVP_DecryptInit_ex(m_decryptCtx, EVP_aes_256_gcm(), nullptr, key.data(), ivPtr) != 1)
+    try
     {
-        throw std::runtime_error("Failed to initialize decryption");
-    }
+        if (m_decryptKeyCache != key)
+        {
+            if (EVP_DecryptInit_ex(m_decryptCtx, EVP_aes_256_gcm(), nullptr, key.data(),
+                                   nullptr) != 1)
+            {
+                throw std::runtime_error("Failed to initialize decryption key");
+            }
+            m_decryptKeyCache = key;
+        }
+        if (EVP_DecryptInit_ex(m_decryptCtx, nullptr, nullptr, nullptr, ivPtr) != 1)
+        {
+            throw std::runtime_error("Failed to initialize decryption");
+        }
 
-    if (EVP_CIPHER_CTX_ctrl(m_decryptCtx, EVP_CTRL_GCM_SET_TAG, GCM_TAG_SIZE, tag.data()) != 1)
+        if (EVP_CIPHER_CTX_ctrl(m_decryptCtx, EVP_CTRL_GCM_SET_TAG, GCM_TAG_SIZE, tag.data()) != 1)
+        {
+            throw std::runtime_error("Failed to set authentication tag");
+        }
+
+        const auto aad = buildAad(seqnum, targetName, targetNameLen);
+        int aadOut = 0;
+        if (EVP_DecryptUpdate(m_decryptCtx, nullptr, &aadOut, aad.data(),
+                              static_cast<int>(aad.size())) != 1)
+        {
+            throw std::runtime_error("Failed to feed AAD into decryption");
+        }
+
+        std::vector<uint8_t> decryptedData(dataSize);
+        int decryptedLen = 0;
+
+        if (EVP_DecryptUpdate(m_decryptCtx, decryptedData.data(), &decryptedLen,
+                              ciphertextPtr, dataSize) != 1)
+        {
+            throw std::runtime_error("Failed during decryption update");
+        }
+
+        int finalLen = 0;
+        int ret = EVP_DecryptFinal_ex(m_decryptCtx, decryptedData.data() + decryptedLen, &finalLen);
+
+        if (ret != 1)
+        {
+            throw TamperDetectedException("AES-GCM authentication tag verification failed");
+        }
+
+        decryptedData.resize(decryptedLen + finalLen);
+        return decryptedData;
+    }
+    catch (...)
     {
-        throw std::runtime_error("Failed to set authentication tag");
+        // Includes tag failures: GCM leaves the context mid-operation, so
+        // force a full re-init before the next use.
+        m_decryptKeyCache.clear();
+        EVP_CIPHER_CTX_reset(m_decryptCtx);
+        throw;
     }
-
-    const auto aad = buildAad(seqnum, targetName, targetNameLen);
-    int aadOut = 0;
-    if (EVP_DecryptUpdate(m_decryptCtx, nullptr, &aadOut, aad.data(),
-                          static_cast<int>(aad.size())) != 1)
-    {
-        throw std::runtime_error("Failed to feed AAD into decryption");
-    }
-
-    std::vector<uint8_t> decryptedData(dataSize);
-    int decryptedLen = 0;
-
-    if (EVP_DecryptUpdate(m_decryptCtx, decryptedData.data(), &decryptedLen,
-                          ciphertextPtr, dataSize) != 1)
-    {
-        throw std::runtime_error("Failed during decryption update");
-    }
-
-    int finalLen = 0;
-    int ret = EVP_DecryptFinal_ex(m_decryptCtx, decryptedData.data() + decryptedLen, &finalLen);
-
-    if (ret != 1)
-    {
-        throw TamperDetectedException("AES-GCM authentication tag verification failed");
-    }
-
-    decryptedData.resize(decryptedLen + finalLen);
-    return decryptedData;
 }
 
 std::vector<uint8_t> Crypto::decrypt(const std::vector<uint8_t> &encryptedData,

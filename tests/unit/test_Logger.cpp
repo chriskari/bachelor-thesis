@@ -9,8 +9,9 @@ class LoggerTest : public ::testing::Test
 protected:
     void SetUp() override
     {
-        // Create a fresh instance for each test
-        Logger::s_instance.reset();
+        // Release any leftover state from a previous test (Meyers singleton
+        // lives for the whole process).
+        Logger::getInstance().reset();
 
         // Create a BufferQueue instance
         queue = std::make_shared<BufferQueue>(1024, 10);
@@ -18,8 +19,7 @@ protected:
 
     void TearDown() override
     {
-        // Clean up the singleton
-        Logger::s_instance.reset();
+        Logger::getInstance().reset();
     }
 
     std::shared_ptr<BufferQueue> queue;

@@ -1,4 +1,5 @@
 #include "Compression.hpp"
+#include <limits>
 #include <stdexcept>
 #include <cstring>
 #include <iostream>
@@ -52,26 +53,22 @@ void Compression::compress(const uint8_t *data, size_t size, std::vector<uint8_t
         }
     }
 
-    m_deflateStream.next_in = const_cast<Bytef *>(data);
-    m_deflateStream.avail_in = size;
-
-    int ret;
-    char outbuffer[32768];
-
-    do
+    // Single-shot deflate straight into `out`: deflateBound() gives a hard
+    // upper bound for the whole input, so no intermediate stack buffer or
+    // re-copy loop is needed. Bounds the input at 4GB (zlib uInt).
+    const uLong bound = deflateBound(&m_deflateStream, static_cast<uLong>(size));
+    if (size > std::numeric_limits<uInt>::max() || bound > std::numeric_limits<uInt>::max())
     {
-        m_deflateStream.next_out = reinterpret_cast<Bytef *>(outbuffer);
-        m_deflateStream.avail_out = sizeof(outbuffer);
+        throw std::runtime_error("Compression input too large for single-shot deflate");
+    }
+    out.resize(bound);
 
-        ret = deflate(&m_deflateStream, Z_FINISH);
+    m_deflateStream.next_in = const_cast<Bytef *>(data);
+    m_deflateStream.avail_in = static_cast<uInt>(size);
+    m_deflateStream.next_out = out.data();
+    m_deflateStream.avail_out = static_cast<uInt>(bound);
 
-        if (out.size() < m_deflateStream.total_out)
-        {
-            out.insert(out.end(),
-                       outbuffer,
-                       outbuffer + (m_deflateStream.total_out - out.size()));
-        }
-    } while (ret == Z_OK);
+    int ret = deflate(&m_deflateStream, Z_FINISH);
 
     if (ret != Z_STREAM_END)
     {
@@ -80,6 +77,8 @@ void Compression::compress(const uint8_t *data, size_t size, std::vector<uint8_t
         m_deflateLevel = 0;
         throw std::runtime_error("Exception during zlib compression");
     }
+
+    out.resize(m_deflateStream.total_out);
 }
 
 std::vector<uint8_t> Compression::compress(std::vector<uint8_t> &&data, int level)

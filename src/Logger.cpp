@@ -1,18 +1,15 @@
 #include "Logger.hpp"
 #include "QueueItem.hpp"
+#include "SegmentedStorage.hpp"
 #include <iostream>
-
-std::unique_ptr<Logger> Logger::s_instance = nullptr;
-std::mutex Logger::s_instanceMutex;
+#include <mutex>
 
 Logger &Logger::getInstance()
 {
-    std::lock_guard<std::mutex> lock(s_instanceMutex);
-    if (s_instance == nullptr)
-    {
-        s_instance.reset(new Logger());
-    }
-    return *s_instance;
+    // Meyers singleton: magic statics are thread-safe since C++11, so no
+    // mutex is taken on this per-append hot path.
+    static Logger instance;
+    return instance;
 }
 
 Logger::Logger()
@@ -53,6 +50,32 @@ bool Logger::initialize(std::shared_ptr<BufferQueue> queue,
     return true;
 }
 
+bool Logger::ensureInitialized(std::shared_ptr<BufferQueue> queue,
+                               std::chrono::milliseconds appendTimeout)
+{
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    if (!queue)
+    {
+        reportError("Cannot initialize with a null queue");
+        return false;
+    }
+    if (m_initialized)
+    {
+        if (m_logQueue != queue)
+        {
+            reportError("Logger already owned by a different queue");
+            return false;
+        }
+        m_appendTimeout = appendTimeout;
+        return true;
+    }
+
+    m_logQueue = std::move(queue);
+    m_appendTimeout = appendTimeout;
+    m_initialized = true;
+    return true;
+}
+
 BufferQueue::ProducerToken Logger::createProducerToken()
 {
     std::shared_ptr<BufferQueue> queue;
@@ -72,6 +95,12 @@ bool Logger::append(LogEntry entry,
                     BufferQueue::ProducerToken &token,
                     const std::optional<std::string> &filename)
 {
+    if (filename && !SegmentedStorage::isValidTargetFilename(*filename))
+    {
+        reportError("Rejected invalid target filename: " + *filename);
+        return false;
+    }
+
     std::shared_ptr<BufferQueue> queue;
     std::chrono::milliseconds timeout;
     {
@@ -93,6 +122,12 @@ bool Logger::appendBatch(std::vector<LogEntry> entries,
                          BufferQueue::ProducerToken &token,
                          const std::optional<std::string> &filename)
 {
+    if (filename && !SegmentedStorage::isValidTargetFilename(*filename))
+    {
+        reportError("Rejected invalid target filename: " + *filename);
+        return false;
+    }
+
     std::shared_ptr<BufferQueue> queue;
     std::chrono::milliseconds timeout;
     {
@@ -124,6 +159,20 @@ bool Logger::reset()
 {
     std::lock_guard<std::mutex> lock(m_stateMutex);
     if (!m_initialized)
+    {
+        return false;
+    }
+
+    m_initialized = false;
+    m_logQueue.reset();
+
+    return true;
+}
+
+bool Logger::resetIf(const std::shared_ptr<BufferQueue> &queue)
+{
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    if (!m_initialized || m_logQueue != queue)
     {
         return false;
     }

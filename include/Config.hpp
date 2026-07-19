@@ -15,7 +15,11 @@ struct LoggingConfig
     size_t batchSize = 100;
     size_t numWriterThreads = 2;
     bool useEncryption = true;
-    int compressionLevel = 9; // 0 disables compression; 1-9 are zlib levels
+    // 0 disables compression; 1-9 are zlib levels. Default 3: the level sweep
+    // (benchmarks/findings/compression_level_sweep.cpp) measured 2x the
+    // ingest throughput of level 9 at an equal compression ratio; levels
+    // above 3 buy <1% ratio on this workload class.
+    int compressionLevel = 3;
     // segmented storage
     std::string basePath = "./logs";
     std::string baseFilename = "default";

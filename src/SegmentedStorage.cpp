@@ -19,8 +19,19 @@ SegmentedStorage::SegmentedStorage(const std::string &basePath,
       m_maxOpenFiles(maxOpenFiles),
       m_cache(maxOpenFiles, this)
 {
+    if (!isValidTargetFilename(m_baseFilename))
+    {
+        throw std::invalid_argument("SegmentedStorage: invalid base filename: " + m_baseFilename);
+    }
     std::filesystem::create_directories(m_basePath);
     m_cache.get(m_baseFilename); // pre-warm
+}
+
+bool SegmentedStorage::isValidTargetFilename(const std::string &filename)
+{
+    if (filename.empty() || filename == "." || filename == "..")
+        return false;
+    return filename.find_first_of("/\\\0", 0, 3) == std::string::npos;
 }
 
 SegmentedStorage::~SegmentedStorage()
@@ -122,7 +133,9 @@ std::shared_ptr<SegmentedStorage::CacheEntry> SegmentedStorage::LRUCache::recons
 
     std::string segmentPath = m_parent->generateSegmentPath(filename, latestIndex);
     entry->currentSegmentPath = segmentPath;
-    entry->fd = m_parent->openWithRetry(segmentPath.c_str(), O_CREAT | O_RDWR | O_APPEND, 0644);
+    // No O_APPEND: on Linux, pwrite to an O_APPEND fd ignores the offset and
+    // appends instead, silently bypassing the reserved-offset scheme below.
+    entry->fd = m_parent->openWithRetry(segmentPath.c_str(), O_CREAT | O_RDWR, 0644);
 
     size_t fileSize = m_parent->getFileSize(segmentPath);
     entry->currentOffset.store(fileSize, std::memory_order_release);
@@ -256,12 +269,48 @@ size_t SegmentedStorage::writeToFile(const std::string &filename, std::vector<ui
     return writeToFile(filename, data.data(), data.size());
 }
 
+SegmentedStorage::WriteHandle SegmentedStorage::createWriteHandle(std::string filename)
+{
+    if (!isValidTargetFilename(filename))
+    {
+        throw std::invalid_argument("SegmentedStorage: invalid target filename: " + filename);
+    }
+    WriteHandle handle;
+    handle.m_filename = std::move(filename);
+    // Entry is resolved lazily on first write; a handle may outlive eviction
+    // and rotation, both of which are detected via fd/generation below.
+    return handle;
+}
+
+size_t SegmentedStorage::write(WriteHandle &handle, const uint8_t *data, size_t size)
+{
+    if (size == 0)
+        return 0;
+    return writeInternal(handle.m_filename, handle.m_entry, data, size);
+}
+
 size_t SegmentedStorage::writeToFile(const std::string &filename, const uint8_t *data, size_t size)
 {
+    if (!isValidTargetFilename(filename))
+    {
+        throw std::invalid_argument("SegmentedStorage: invalid target filename: " + filename);
+    }
     if (size == 0)
         return 0;
 
     std::shared_ptr<CacheEntry> entry = m_cache.get(filename);
+    return writeInternal(filename, entry, data, size);
+}
+
+size_t SegmentedStorage::writeInternal(const std::string &filename,
+                                       std::shared_ptr<CacheEntry> &entry,
+                                       const uint8_t *data, size_t size)
+{
+    if (!entry)
+    {
+        entry = m_cache.get(filename);
+    }
+
     size_t writeOffset;
 
     // Reserve and pwrite under a shared_lock so a concurrent rotation (exclusive lock)
@@ -341,7 +390,7 @@ std::string SegmentedStorage::rotateSegment(const std::string &filename, std::sh
     entry->currentOffset.store(0, std::memory_order_release);
     std::string newPath = generateSegmentPath(filename, newIndex);
     entry->currentSegmentPath = newPath;
-    entry->fd = openWithRetry(newPath.c_str(), O_CREAT | O_RDWR | O_APPEND, 0644);
+    entry->fd = openWithRetry(newPath.c_str(), O_CREAT | O_RDWR, 0644);
 
     // Bump generation last so an acquire-reader that sees the new value also sees the
     // reset offset and new fd from the preceding release stores.

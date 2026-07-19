@@ -71,12 +71,28 @@ void Writer::processLogEntries()
     std::vector<uint8_t> scratchA;
     std::vector<uint8_t> scratchB;
 
+    // Per-writer handles skip the storage's global LRU mutex on every batch;
+    // stale handles (evicted/rotated entries) refresh themselves inside write().
+    std::unordered_map<std::string, SegmentedStorage::WriteHandle> writeHandles;
+    auto handleFor = [&](const std::string &target) -> SegmentedStorage::WriteHandle &
+    {
+        auto it = writeHandles.find(target);
+        if (it == writeHandles.end())
+        {
+            it = writeHandles.emplace(target, m_storage->createWriteHandle(target)).first;
+        }
+        return it->second;
+    };
+
     while (m_running)
     {
-        size_t entriesDequeued = m_queue.tryDequeueBatch(batch, m_batchSize, m_consumerToken);
+        // Semaphore wait: wakes immediately when an entry is enqueued; the
+        // timeout only bounds how often m_running is rechecked for shutdown.
+        size_t entriesDequeued =
+            m_queue.waitDequeueBatch(batch, m_batchSize, m_consumerToken,
+                                     std::chrono::milliseconds(10));
         if (entriesDequeued == 0)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
 
@@ -115,14 +131,12 @@ void Writer::processLogEntries()
                     std::swap(current, other);
                 }
 
-                if (targetFilename)
-                {
-                    m_storage->writeToFile(*targetFilename, current->data(), current->size());
-                }
-                else
-                {
-                    m_storage->write(current->data(), current->size());
-                }
+                // Write via a cached handle. The default target uses the
+                // storage's base filename (which may differ from the AAD
+                // fallback m_baseFilename in stand-alone unit-test setups).
+                const std::string &writeTarget =
+                    targetFilename ? *targetFilename : m_storage->baseFilename();
+                m_storage->write(handleFor(writeTarget), current->data(), current->size());
             }
             catch (const std::exception &e)
             {

@@ -14,7 +14,8 @@ LoggingManager::LoggingManager(const LoggingConfig &config)
       m_useEncryption(config.useEncryption),
       m_compressionLevel(config.compressionLevel),
       m_basePath(config.basePath),
-      m_baseFilename(config.baseFilename)
+      m_baseFilename(config.baseFilename),
+      m_appendTimeout(config.appendTimeout)
 {
     // Zero/false are valid for useEncryption and compressionLevel, so they aren't checked.
     if (config.queueCapacity == 0)
@@ -45,7 +46,24 @@ LoggingManager::LoggingManager(const LoggingConfig &config)
         config.maxOpenFiles);
     m_seqnumAllocator = std::make_shared<SeqnumAllocator>();
 
-    Logger::getInstance().initialize(m_queue, config.appendTimeout);
+    // Continue per-target seqnums after whatever earlier runs left on disk;
+    // restarting them at 0 would duplicate seqnums and make export abort.
+    if (m_useEncryption)
+    {
+        m_recoveredStates = LogExporter::recoverTargetStates(m_basePath, m_compressionLevel);
+        for (const auto &[target, state] : m_recoveredStates)
+        {
+            m_seqnumAllocator->seed(target, state.count);
+        }
+    }
+
+    // A second concurrent manager must fail loudly here — otherwise its
+    // appends would silently route into the first manager's queue and storage.
+    if (!Logger::getInstance().initialize(m_queue, config.appendTimeout))
+    {
+        throw std::runtime_error(
+            "LoggingManager: Logger singleton is already owned by another instance");
+    }
 
     m_writers.reserve(m_numWriterThreads);
 }
@@ -53,6 +71,9 @@ LoggingManager::LoggingManager(const LoggingConfig &config)
 LoggingManager::~LoggingManager()
 {
     stop();
+    // Release the singleton even if this manager was never started (stop()
+    // only resets it on a running->stopped transition).
+    Logger::getInstance().resetIf(m_queue);
 }
 
 bool LoggingManager::start()
@@ -62,6 +83,14 @@ bool LoggingManager::start()
     if (m_running.load(std::memory_order_acquire))
     {
         std::cerr << "LoggingSystem: Already running" << std::endl;
+        return false;
+    }
+
+    // Re-acquire the Logger singleton: a previous stop() released it.
+    if (!Logger::getInstance().ensureInitialized(m_queue, m_appendTimeout))
+    {
+        std::cerr << "LoggingSystem: Logger singleton is owned by another instance"
+                  << std::endl;
         return false;
     }
 
@@ -97,9 +126,11 @@ bool LoggingManager::stop()
 
     // Drain producers already past the accepting-check so no entry lands after flush().
     // Pairs with the increment-then-check ordering in InflightGuard below.
+    // Sleep instead of yield: a producer may be parked inside its append
+    // timeout, and spinning a core for that long helps nobody.
     while (m_inflightAppends.load(std::memory_order_acquire) > 0)
     {
-        std::this_thread::yield();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
     if (m_queue)
@@ -129,6 +160,13 @@ bool LoggingManager::stop()
                 if (count == 0)
                     continue;
 
+                // Nothing appended for this target since the seal found at
+                // startup — rewriting an identical seal adds nothing.
+                auto recovered = m_recoveredStates.find(target);
+                if (recovered != m_recoveredStates.end() && recovered->second.sealed &&
+                    recovered->second.count == count)
+                    continue;
+
                 std::vector<uint8_t> plaintext(seal_marker::MAGIC,
                                                seal_marker::MAGIC + seal_marker::MAGIC_LEN);
                 std::vector<uint8_t> scratch;
@@ -148,6 +186,7 @@ bool LoggingManager::stop()
                                reinterpret_cast<const uint8_t *>(target.data()),
                                target.size());
                 m_storage->writeToFile(target, encrypted.data(), encrypted.size());
+                m_recoveredStates[target] = RecoveredTargetState{count, true};
             }
         }
         catch (const std::exception &e)
@@ -164,7 +203,7 @@ bool LoggingManager::stop()
 
     m_running.store(false, std::memory_order_release);
 
-    Logger::getInstance().reset();
+    Logger::getInstance().resetIf(m_queue);
 
     std::cout << "LoggingSystem: Stopped" << std::endl;
     return true;
@@ -172,7 +211,7 @@ bool LoggingManager::stop()
 
 BufferQueue::ProducerToken LoggingManager::createProducerToken()
 {
-    return Logger::getInstance().createProducerToken();
+    return m_queue->createProducerToken();
 }
 
 namespace
@@ -194,6 +233,9 @@ struct InflightGuard
 };
 } // namespace
 
+// Append hot path: goes to m_queue directly instead of through the Logger
+// singleton — m_queue is immutable for the manager's lifetime, so no lock or
+// state snapshot is needed per call.
 bool LoggingManager::append(LogEntry entry,
                             BufferQueue::ProducerToken &token,
                             const std::optional<std::string> &filename)
@@ -204,8 +246,15 @@ bool LoggingManager::append(LogEntry entry,
         std::cerr << "LoggingSystem: Not accepting entries" << std::endl;
         return false;
     }
+    if (filename && !SegmentedStorage::isValidTargetFilename(*filename))
+    {
+        std::cerr << "LoggingSystem: Rejected invalid target filename: " << *filename
+                  << std::endl;
+        return false;
+    }
 
-    return Logger::getInstance().append(std::move(entry), token, filename);
+    QueueItem item{std::move(entry), filename};
+    return m_queue->enqueueBlocking(std::move(item), token, m_appendTimeout);
 }
 
 bool LoggingManager::appendBatch(std::vector<LogEntry> entries,
@@ -218,8 +267,25 @@ bool LoggingManager::appendBatch(std::vector<LogEntry> entries,
         std::cerr << "LoggingSystem: Not accepting entries" << std::endl;
         return false;
     }
+    if (filename && !SegmentedStorage::isValidTargetFilename(*filename))
+    {
+        std::cerr << "LoggingSystem: Rejected invalid target filename: " << *filename
+                  << std::endl;
+        return false;
+    }
 
-    return Logger::getInstance().appendBatch(std::move(entries), token, filename);
+    if (entries.empty())
+    {
+        return true;
+    }
+
+    std::vector<QueueItem> batch;
+    batch.reserve(entries.size());
+    for (auto &entry : entries)
+    {
+        batch.emplace_back(std::move(entry), filename);
+    }
+    return m_queue->enqueueBatchBlocking(std::move(batch), token, m_appendTimeout);
 }
 
 bool LoggingManager::exportLogs(
@@ -240,6 +306,9 @@ bool LoggingManager::exportLogs(
     filter.to = toTimestamp;
     filter.subjectId = dataSubjectId;
 
-    LogExporter exporter(m_basePath, m_useEncryption, m_compressionLevel);
+    // Cap = largest batch plaintext this configuration can legally write.
+    const size_t maxBatchPlaintext =
+        m_batchSize * (LogEntry::MAX_ENTRY_SIZE + sizeof(uint32_t)) + sizeof(uint32_t);
+    LogExporter exporter(m_basePath, m_useEncryption, m_compressionLevel, maxBatchPlaintext);
     return exporter.exportToNDJSON(outputPath, filter);
 }

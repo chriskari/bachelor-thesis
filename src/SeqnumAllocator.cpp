@@ -16,6 +16,22 @@ uint64_t SeqnumAllocator::next(const std::string &target)
     return counter->fetch_add(1, std::memory_order_relaxed);
 }
 
+void SeqnumAllocator::seed(const std::string &target, uint64_t count)
+{
+    std::lock_guard<std::mutex> lock(m_mapMutex);
+    auto it = m_counters.find(target);
+    if (it == m_counters.end())
+    {
+        m_counters.emplace(target, std::make_unique<std::atomic<uint64_t>>(count));
+        return;
+    }
+    uint64_t current = it->second->load(std::memory_order_relaxed);
+    while (current < count &&
+           !it->second->compare_exchange_weak(current, count, std::memory_order_relaxed))
+    {
+    }
+}
+
 uint64_t SeqnumAllocator::peek(const std::string &target) const
 {
     std::lock_guard<std::mutex> lock(m_mapMutex);
